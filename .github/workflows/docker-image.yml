@@ -97,7 +97,7 @@ jobs:
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=sha
-            type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=latest,enable=false # PR18 test build: do not overwrite latest
 
       # 版本注入：把版本号硬编码进镜像内 dashboard/version.json（镜像里显示什么由这里决定）。
       #
