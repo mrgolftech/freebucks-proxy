@@ -47,11 +47,11 @@ import {
   stripFreebuffConversationState,
 } from './free-mode.js'
 import {
-  chooseHermesDelegateAlias,
-  createHermesDelegateSseTransform,
-  restoreHermesDelegateInResponse,
-  rewriteHermesDelegateForUpstream,
-} from './tool-alias.js'
+  createToolNameMapper,
+  createToolMapperSseTransform,
+  restoreToolNamesInResponse,
+  rewriteToolNamesForUpstream,
+} from './tool-mapper.js'
 import { logger } from './util/log.js'
 
 /**
@@ -954,7 +954,7 @@ export function createProxyHandler(ctx) {
               email: rt.email,
             })
 
-            const hermesDelegateAlias = chooseHermesDelegateAlias(body.tools)
+            const toolNameMapper = createToolNameMapper(body.tools)
             const forwardBody = buildForwardBody(
               body,
               upstreamModel,
@@ -962,14 +962,14 @@ export function createProxyHandler(ctx) {
               runId,
               agentId,
               clientId,
-              hermesDelegateAlias,
+              toolNameMapper,
             )
             result = await forwardCompletions({
               req,
               res,
               forwardBody,
               stream,
-              hermesDelegateAlias,
+              toolNameMapper,
               upstream: rt.upstream,
               // 会话剩余时间：用于把流 idle 超时收敛到会话过期附近，过期即掐
               sessionRemainingMs: snap.remainingMs,
@@ -1238,7 +1238,7 @@ export function createProxyHandler(ctx) {
     runId,
     agentId,
     clientId,
-    hermesDelegateAlias,
+    toolNameMapper,
   ) {
     const { clientId: fallbackClientId } = newIds()
     const effectiveClientId = clientId || fallbackClientId
@@ -1246,11 +1246,11 @@ export function createProxyHandler(ctx) {
       ...clientBody,
       model: upstreamModel,
     })
-    // Hermes 的 delegate_task 命中上游 foreign_tool_names。只在客户端实际声明
-    // 该工具时做窄范围双向别名；历史 tool_calls/tool message/tool_choice 同步改名，
-    // 回程再恢复原名，避免破坏 Hermes 的硬编码派发。见 issue #17 与：
-    // .agents/notes/implemented/bug-fix/2026-09-19-hermes-delegate-task-alias.md
-    body = rewriteHermesDelegateForUpstream(body, hermesDelegateAlias)
+    // 通用工具名虚拟化：凡命中上游 FOREIGN_HARNESS_TOOL_NAMES 的客户端工具，
+    // 在上游 wire 上改成一对一 mcp__ 命名空间别名；历史/tool_choice 同步改写，
+    // 回程再恢复客户端原名。参数 schema 完全不动，避免语义映射与同名碰撞。
+    // 见 .agents/notes/implemented/feature/2026-09-19-universal-tool-translation.md
+    body = rewriteToolNamesForUpstream(body, toolNameMapper)
     // One reasoning field only — avoids Freebuff default + client dual fields.
     body = normalizeReasoningFields(body)
     // 输出预算治理：客户端偏小的 max_tokens/max_completion_tokens 会把思考链
@@ -1392,7 +1392,7 @@ export function createProxyHandler(ctx) {
     res,
     forwardBody,
     stream,
-    hermesDelegateAlias,
+    toolNameMapper,
     upstream,
     sessionRemainingMs,
     /**
@@ -1489,13 +1489,18 @@ export function createProxyHandler(ctx) {
 
     const status = upstreamRes.status
     const respHeaders = filterResponseHeaders(upstreamRes.headers)
-    if (hermesDelegateAlias) {
+    if (toolNameMapper.size > 0) {
       // 回程会改写 tool_calls 的 function.name，原 Content-Length 已不再可信。
       delete respHeaders['content-length']
-      res.setHeader(
-        'x-freebuff-proxy-tool-alias',
-        `delegate_task=${hermesDelegateAlias}`,
-      )
+      res.setHeader('x-freebuff-proxy-tool-map-count', String(toolNameMapper.size))
+      // 兼容 PR #18 期间的观测方式：Hermes delegate_task 仍单独暴露映射结果。
+      const delegateAlias = toolNameMapper.clientToUpstream.get('delegate_task')
+      if (delegateAlias) {
+        res.setHeader(
+          'x-freebuff-proxy-tool-alias',
+          `delegate_task=${delegateAlias}`,
+        )
+      }
     }
     if (toolsStripped) {
       // 可观测性：下游能看出这次回答是在"无工具"模式下取得的。
@@ -1609,20 +1614,21 @@ export function createProxyHandler(ctx) {
       return { ok: true, wrote: true }
     }
 
-    // 非流式 JSON 可以整体恢复工具名；流式 SSE 则逐 data 行改写首个携带
-    // function.name 的 chunk，后续 arguments 分片原样透传。
-    if (hermesDelegateAlias && !stream) {
+    // 非流式 JSON 可以整体恢复工具名；流式 SSE 则逐 data 行恢复本请求建立的
+    // tool name map。只有 request leg 真正虚拟化过的名字会回译；客户端原生
+    // mcp__* 工具绝不会被盲目去前缀。
+    if (toolNameMapper.size > 0 && !stream) {
       const text = await upstreamRes.text()
       let output = text
       try {
         const parsed = text ? JSON.parse(text) : null
         if (parsed) {
           output = JSON.stringify(
-            restoreHermesDelegateInResponse(parsed, hermesDelegateAlias),
+            restoreToolNamesInResponse(parsed, toolNameMapper),
           )
         }
       } catch {
-        // 非 JSON 成功响应保持原样；不要为了兼容别名制造新的失败。
+        // 非 JSON 成功响应保持原样；不要为了兼容映射制造新的失败。
       }
       res.writeHead(status, respHeaders)
       res.end(output)
@@ -1630,9 +1636,9 @@ export function createProxyHandler(ctx) {
     }
 
     const responseBody =
-      hermesDelegateAlias && stream
+      toolNameMapper.size > 0 && stream
         ? upstreamRes.body.pipeThrough(
-            createHermesDelegateSseTransform(hermesDelegateAlias),
+            createToolMapperSseTransform(toolNameMapper),
           )
         : upstreamRes.body
     res.writeHead(status, respHeaders)

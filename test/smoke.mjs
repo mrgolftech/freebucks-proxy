@@ -41,11 +41,11 @@ import {
   FREEBUFF_SYSTEM_OPENING,
 } from '../src/free-mode.js'
 import {
-  chooseHermesDelegateAlias,
-  restoreHermesDelegateInResponse,
-  rewriteHermesDelegateForUpstream,
-  rewriteHermesDelegateSseLine,
-} from '../src/tool-alias.js'
+  createToolNameMapper,
+  restoreToolNamesInResponse,
+  rewriteToolMapperSseLine,
+  rewriteToolNamesForUpstream,
+} from '../src/tool-mapper.js'
 import {
   detectForeignClient,
   isGenuineSignatureTool,
@@ -71,7 +71,7 @@ import {
 
 configureLogger({ level: 'error' })
 
-// --- unit: Hermes delegate_task compatibility alias (issue #17) ---
+// --- unit: universal foreign-harness tool-name virtualization ---
 {
   const clientBody = {
     tools: [
@@ -86,6 +86,13 @@ configureLogger({ level: 'error' })
           },
         },
       },
+      { type: 'function', function: { name: 'Bash', parameters: { type: 'object', properties: { command: { type: 'string' } } } } },
+      { type: 'function', function: { name: 'AskQuestion', parameters: { type: 'object', properties: { question: { type: 'string' } } } } },
+      { type: 'function', function: { name: 'exec_command', parameters: { type: 'object', properties: { cmd: { type: 'string' } } } } },
+      { type: 'function', function: { name: 'todowrite', parameters: { type: 'object', properties: { todos: { type: 'array' } } } } },
+      { type: 'function', function: { name: 'custom_tool', parameters: { type: 'object', properties: {} } } },
+      // 原生 MCP 工具必须原样保留；它还刻意占住默认 delegate alias，验证碰撞避让。
+      { type: 'function', function: { name: 'mcp__delegate_task', parameters: { type: 'object', properties: {} } } },
     ],
     tool_choice: {
       type: 'function',
@@ -105,54 +112,79 @@ configureLogger({ level: 'error' })
       { role: 'tool', name: 'delegate_task', tool_call_id: 'call-1', content: 'ok' },
     ],
   }
-  const alias = chooseHermesDelegateAlias(clientBody.tools)
-  assert.equal(alias, 'spawn_subagent')
-  const upstreamBody = rewriteHermesDelegateForUpstream(clientBody, alias)
-  assert.equal(upstreamBody.tools[0].function.name, alias)
-  assert.equal(upstreamBody.tool_choice.function.name, alias)
-  assert.equal(upstreamBody.messages[0].tool_calls[0].function.name, alias)
-  assert.equal(upstreamBody.messages[1].name, alias)
+
+  const mapper = createToolNameMapper(clientBody.tools)
+  assert.equal(mapper.size, 5, '五个已知 foreign harness 名必须全部虚拟化')
+  const delegateAlias = mapper.clientToUpstream.get('delegate_task')
+  assert.ok(delegateAlias?.startsWith('mcp__delegate_task'))
+  assert.notEqual(
+    delegateAlias,
+    'mcp__delegate_task',
+    '客户端已占用 mcp__delegate_task 时必须选无冲突别名',
+  )
+  assert.equal(mapper.clientToUpstream.get('Bash'), 'mcp__Bash')
+  assert.equal(mapper.clientToUpstream.get('AskQuestion'), 'mcp__AskQuestion')
+  assert.equal(mapper.clientToUpstream.get('exec_command'), 'mcp__exec_command')
+  assert.equal(mapper.clientToUpstream.get('todowrite'), 'mcp__todowrite')
+
+  const upstreamBody = rewriteToolNamesForUpstream(clientBody, mapper)
+  const upstreamNames = upstreamBody.tools.map((t) => t.function.name)
+  assert.ok(upstreamNames.includes(delegateAlias))
+  assert.ok(upstreamNames.includes('mcp__Bash'))
+  assert.ok(upstreamNames.includes('mcp__AskQuestion'))
+  assert.ok(upstreamNames.includes('mcp__exec_command'))
+  assert.ok(upstreamNames.includes('mcp__todowrite'))
+  assert.ok(upstreamNames.includes('custom_tool'), '未知自定义工具不应被擅自改名')
+  assert.ok(upstreamNames.includes('mcp__delegate_task'), '客户端原生 MCP 名必须原样保留')
+  assert.equal(upstreamBody.tool_choice.function.name, delegateAlias)
+  assert.equal(upstreamBody.messages[0].tool_calls[0].function.name, delegateAlias)
+  assert.equal(upstreamBody.messages[1].name, delegateAlias)
   assert.equal(clientBody.tools[0].function.name, 'delegate_task', '不得修改客户端原对象')
 
+  // 注入 genuine signature 后，wire 上不再含显式 foreign tool names。
   const signedTools = ensureFreebuffToolSignature(upstreamBody.tools, true)
   const verdict = detectForeignClient({ ...upstreamBody, tools: signedTools }, true)
-  assert.notEqual(verdict.signal, 'foreign_tool_names')
+  assert.equal(verdict.signal, null)
   assert.deepEqual(verdict.foreignToolNames, [])
 
-  const restored = restoreHermesDelegateInResponse(
+  const restored = restoreToolNamesInResponse(
     {
       choices: [
         {
           message: {
             tool_calls: [
-              { function: { name: alias, arguments: '{"prompt":"x"}' } },
+              { function: { name: delegateAlias, arguments: '{"prompt":"x"}' } },
+              { function: { name: 'mcp__Bash', arguments: '{"command":"pwd"}' } },
+              // 原生 MCP 名不是 mapper 生成的，不能被盲目去前缀。
+              { function: { name: 'mcp__delegate_task', arguments: '{}' } },
             ],
           },
           delta: {
-            tool_calls: [{ function: { name: alias, arguments: '' } }],
+            tool_calls: [{ function: { name: 'mcp__exec_command', arguments: '' } }],
           },
         },
       ],
     },
-    alias,
+    mapper,
   )
   assert.equal(restored.choices[0].message.tool_calls[0].function.name, 'delegate_task')
-  assert.equal(restored.choices[0].delta.tool_calls[0].function.name, 'delegate_task')
+  assert.equal(restored.choices[0].message.tool_calls[1].function.name, 'Bash')
+  assert.equal(restored.choices[0].message.tool_calls[2].function.name, 'mcp__delegate_task')
+  assert.equal(restored.choices[0].delta.tool_calls[0].function.name, 'exec_command')
 
-  const sse = rewriteHermesDelegateSseLine(
-    'data: {"choices":[{"delta":{"tool_calls":[{"function":{"name":"spawn_subagent","arguments":""}}]}}]}\n',
-    alias,
+  const sse = rewriteToolMapperSseLine(
+    'data: {"choices":[{"delta":{"tool_calls":[{"function":{"name":"mcp__Bash","arguments":""}}]}}]}\n',
+    mapper,
   )
-  assert.match(sse, /"name":"delegate_task"/)
+  assert.match(sse, /"name":"Bash"/)
 
-  // 已有同名工具时选择无冲突别名，不能覆盖客户端自己的 spawn_subagent。
-  assert.equal(
-    chooseHermesDelegateAlias([
-      { type: 'function', function: { name: 'delegate_task' } },
-      { type: 'function', function: { name: 'spawn_subagent' } },
-    ]),
-    'spawn_subagent_2',
-  )
+  // 没有命中 foreign harness 名时保持零开销/同对象语义。
+  const plain = {
+    tools: [{ type: 'function', function: { name: 'my_custom_tool' } }],
+  }
+  const identity = createToolNameMapper(plain.tools)
+  assert.equal(identity.size, 0)
+  assert.equal(rewriteToolNamesForUpstream(plain, identity), plain)
 }
 
 const originalFetch = globalThis.fetch
