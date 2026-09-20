@@ -1623,6 +1623,32 @@ async function saveBlockPremiumSetting(event) {
   }
 }
 
+/** 「只看 Freebucks 计费模型」开关：纯展示过滤（不动 /v1/models、白名单与调度），
+ * 持久化在 /api/settings 的 modelListOnlyFreebucks。 */
+async function saveOnlyFreebucksSetting(event) {
+  const input = event.currentTarget
+  const enabled = input.checked
+  input.disabled = true
+  try {
+    await api('/api/settings', {
+      method: 'POST',
+      body: JSON.stringify({ modelListOnlyFreebucks: enabled }),
+    })
+    toast(enabled ? '已只显示 Freebucks 计费模型' : '已显示全部模型')
+    try {
+      const s = await api('/api/settings')
+      input.checked = s.modelListOnlyFreebucks === true
+      updateSwitchLabel(input)
+    } catch { /* 忽略回读失败 */ }
+    // 切换后即时重渲染本表（过滤生效）
+    refreshModelSettingsCard()
+  } catch (err) {
+    input.checked = !enabled
+    toast(err.message, true)
+    input.disabled = false
+  }
+}
+
 /** 同步 switch 旁边的「已开启/已关闭」文字标签，保持 DOM 与状态一致 */
 function updateSwitchLabel(input) {
   const track = input.closest('.switch')
@@ -1972,7 +1998,7 @@ async function renderModelSettings(view) {
   const rows = [...known.values()]
   const isAdmin = state.me.role === 'admin'
   // 屏蔽收费模型开关（读全局设置，默认开）
-  let settings = { blockPremiumModels: true }
+  let settings = { blockPremiumModels: true, modelListOnlyFreebucks: false }
   try { settings = await api('/api/settings') } catch { /* 忽略 */ }
   const blockPremium = settings.blockPremiumModels !== false
   const blockToggleAttrs = {
@@ -1983,6 +2009,22 @@ async function renderModelSettings(view) {
   }
   if (blockPremium) blockToggleAttrs.checked = ''
   if (state.me.role !== 'admin') blockToggleAttrs.disabled = ''
+  const onlyFreebucks = settings.modelListOnlyFreebucks === true
+  const freebucksToggleAttrs = {
+    id: 'only-freebucks',
+    type: 'checkbox',
+    class: 'switch-input',
+    onchange: saveOnlyFreebucksSetting,
+  }
+  if (onlyFreebucks) freebucksToggleAttrs.checked = ''
+  if (state.me.role !== 'admin') freebucksToggleAttrs.disabled = ''
+  // 「只看 Freebucks 计费模型」过滤（设置持久化在 /api/settings）。判据用后端给的
+  // freebucksBilled / 单价存在性——这类模型按 FB/小时 扣钱包，与次数限流模型
+  // （premium / 每日 次）是两本完全不同的账。过滤只影响本表显示。
+  const isFreebucksRow = (m) => m.freebucksBilled === true || Number.isFinite(m.freebucksPerHour)
+  const filteredOutCount = onlyFreebucks ? rows.filter((m) => !isFreebucksRow(m)).length : 0
+  const visibleRows = onlyFreebucks ? rows.filter(isFreebucksRow) : rows
+  const freebucksCount = rows.filter(isFreebucksRow).length
 
   const card = el('div', { id: 'models-card', class: 'card', style: 'margin-top:12px' }, [
     el('div', { class: 'row spread' }, [
@@ -2005,9 +2047,21 @@ async function renderModelSettings(view) {
       el('span', { class: 'muted', style: 'font-size:12px' },
         `屏蔽收费模型（pool=premium 如 gpt-5.6-luna / kimi / -max：免费账号用不了，从列表与调度彻底排除，避免占额度/触风控）`),
     ]),
+    el('div', { class: 'row', style: 'margin-top:8px;align-items:center;gap:8px' }, [
+      el('label', { class: 'switch', for: 'only-freebucks' }, [
+        el('input', freebucksToggleAttrs),
+        el('span', { class: 'switch-track', 'aria-hidden': 'true' }),
+        el('span', { class: 'switch-status' }, onlyFreebucks ? '已开启' : '已关闭'),
+      ]),
+      el('span', { class: 'muted', style: 'font-size:12px' },
+        `只看 Freebucks 计费模型（有 FB/h 单价、按会话占用时长扣钱包的模型共 ${freebucksCount} 个；`
+        + '过滤掉次数限流/premium 等非计费行'
+        + (onlyFreebucks && filteredOutCount ? `，已隐藏 ${filteredOutCount} 个` : '')
+        + '。仅影响本表显示，不改 /v1/models 与调度）'),
+    ]),
     upstream.accessTier
       ? el('div', { class: 'muted', style: 'margin-top:6px;font-size:12px' },
-          `上游实时目录（${upstream.models.length} 个）· 当前 accessTier: ${upstream.accessTier}`)
+          `上游实时目录（${upstream.models.length} 个，其中 Freebucks 计费 ${freebucksCount} 个）· 当前 accessTier: ${upstream.accessTier}`)
       : null,
     el('div', { class: 'table-wrap', style: 'margin-top:10px;max-height:280px;overflow:auto' }, [
       el('table', { style: 'font-size:12px' }, [
@@ -2021,7 +2075,8 @@ async function renderModelSettings(view) {
           el('th', {}, '来源'),
           isAdmin ? el('th', {}, '操作') : null,
         ])),
-        el('tbody', {}, rows.map((m) => el('tr', {}, [
+        el('tbody', {}, visibleRows.length
+          ? visibleRows.map((m) => el('tr', {}, [
           el('td', { style: 'font-family:var(--mono);font-size:11px' }, m.id),
           el('td', {}, m.display_name || m.displayName || '—'),
           el('td', {}, el('span', { class: 'badge', class: poolBadgeClass(m.pool) }, poolLabel(m.pool))),
@@ -2038,7 +2093,14 @@ async function renderModelSettings(view) {
                 onclick: () => removeCustomModel(m.id),
               }, icon('trash', 13)))
             : null,
-        ]))),
+        ]))
+          : el('tr', {}, el('td', {
+              colspan: isAdmin ? '8' : '7',
+              class: 'muted',
+              style: 'padding:10px 0;font-size:12px',
+            }, onlyFreebucks
+              ? '当前没有 Freebucks 计费模型（上游价格表为空？关闭此开关可查看全部模型）'
+              : '上游目录为空'))),
       ]),
     ]),
     el('div', { style: 'margin-top:14px' }, [
@@ -2240,7 +2302,7 @@ function customModelRow(m = {}) {
   const pool = el('select', {
     'data-f': 'pool',
     style: 'flex:1;min-width:90px',
-  }, ['', 'daily', 'premium', 'referral', 'limited_offer'].map((p) =>
+  }, ['', 'daily', 'premium', 'referral', 'limited_offer', 'freebucks'].map((p) =>
     el('option', { value: p, selected: (m.pool || '') === p }, p ? poolLabel(p) : '池（默认）')))
   const agent = el('input', {
     class: 'mono',
@@ -2333,6 +2395,9 @@ function collectCustomModels() {
 function poolBadgeClass(pool) {
   if (pool === 'premium') return 'badge warn'
   if (pool === 'referral') return 'badge admin'
+  // Freebucks 钱包计费（按会话占用时长扣点）：与 premium 的"用不了"相反，
+  // 这类模型是免费账号**真正能买**的，用 ok 色区分。
+  if (pool === 'freebucks') return 'badge ok'
   return 'badge'
 }
 
@@ -2343,6 +2408,7 @@ const POOL_LABELS = {
   referral: '邀请',
   limited_offer: '限时',
   glm_v53_flash: 'GLM 5.3',
+  freebucks: '计费',
 }
 function poolLabel(pool) {
   if (!pool) return '—'

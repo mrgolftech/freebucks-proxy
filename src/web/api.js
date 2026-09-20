@@ -530,11 +530,20 @@ export function createWebApi(deps) {
         // 上游探测返回上游真实存在的全部模型（不过滤 hidden）——
         // 「同步上游模型」要能看到并拉回上游的完整列表；
         // 用户是否隐藏由「模型管理」的 hidden 列表独立控制。
+        //
+        // **两本账要取并集**（2026-09-20）：`rateLimitsByModel` 只列「有请求额度的
+        // 池」（premium / daily 次数型），而 freebucks.prices 里的**钱包计费模型**
+        // 根本不出现在限流表里。旧实现只遍历 limits，于是 glm-5.3-flash、mimo-v2.5、
+        // deepseek-v4-flash 这些明明有价可买的模型在「额度」列显示 `—` —— 用户看到
+        // 的表缺了半个上游目录。这里把 prices 有而 limits 没有的 id 补成一行：
+        // limit/recentCount = null（确实没有次数额度），pool = 'freebucks'
+        // （只用于展示，调度与白名单只判断 `pool === 'premium'`，不受影响）。
         const models = Object.entries(limits).map(([id, info]) => ({
           id,
           limit: info?.limit ?? null,
           recentCount: info?.recentCount ?? null,
           freebucksPerHour: Number.isFinite(prices[id]) ? prices[id] : null,
+          freebucksBilled: Number.isFinite(prices[id]),
           pool: info?.pool ?? null,
           poolLabel: info?.poolLabel ?? null,
           resetAt: info?.resetAt ?? null,
@@ -545,12 +554,40 @@ export function createWebApi(deps) {
             modelStore ? modelStore.list() : [],
           ),
         }))
+        const seen = new Set(models.map((m) => m.id))
+        for (const [id, price] of Object.entries(prices)) {
+          if (seen.has(id) || !Number.isFinite(price)) continue
+          models.push({
+            id,
+            // 钱包计费模型没有「今日 已用/上限」次数，留 null 让前端走单价分支，
+            // 不要用 0 冒充额度（0 会被误读成「已用完」）。
+            limit: null,
+            recentCount: null,
+            freebucksPerHour: price,
+            freebucksBilled: true,
+            pool: 'freebucks',
+            // 故意留空：syncUpstreamModels() 会用 poolLabel 兜底 displayName，
+            // 若把「Freebucks 计费」写进去就会变成模型的显示名。
+            poolLabel: null,
+            resetAt: null,
+            resetTimeZone: null,
+            agentId: agentIdForModel(id, modelStore ? modelStore.list() : []),
+            fallbackAgentId: agentFallbackForModel(
+              id,
+              modelStore ? modelStore.list() : [],
+            ),
+          })
+        }
         sendJson(res, 200, {
           models,
           accessTier: session?.accessTier ?? null,
           // 上游此刻真实给出的模型清单（多账号取并集）：前端据此区分
           // "目录里有"与"上游此刻确实给额度"，而不是靠一个布尔开关。
+          // 口径保持**限流表**：freebucks 计费模型不在这里（它们靠价格表出现），
+          // 前端要判断"能不能买"请用 freebucksModelIds / freebucksBilled。
           upstreamModelIds: Object.keys(session?.rateLimitsByModel || {}),
+          // Freebucks 价格表的全部模型 id：钱包计费能力的权威清单。
+          freebucksModelIds: Object.keys(prices),
           freebucks: session?.freebucks || null,
           note: '只读探测，不创建 session',
         })
@@ -1119,6 +1156,9 @@ export function createWebApi(deps) {
           settingsStore?.get().accountOverflowWaitMs ?? 15_000,
         blockPremiumModels:
           settingsStore?.get().blockPremiumModels === true,
+        // 「模型管理」列表只显示 Freebucks 计费模型（纯展示过滤，不影响调度）。
+        modelListOnlyFreebucks:
+          settingsStore?.get().modelListOnlyFreebucks === true,
         // 额度保护：空闲自动释放秒数 + 单请求新会话预算。
         // 未在控制台保存过时回落 config.yaml 的默认值（默认 600s，见 config.js）。
         idleReleaseSec:
@@ -1205,6 +1245,15 @@ export function createWebApi(deps) {
           return true
         }
         patch.accountOverflowWaitMs = body.accountOverflowWaitMs
+      }
+      if (body.modelListOnlyFreebucks !== undefined) {
+        if (typeof body.modelListOnlyFreebucks !== 'boolean') {
+          sendJson(res, 400, {
+            error: 'modelListOnlyFreebucks 必须是布尔值',
+          })
+          return true
+        }
+        patch.modelListOnlyFreebucks = body.modelListOnlyFreebucks
       }
       if (body.blockPremiumModels !== undefined) {
         if (typeof body.blockPremiumModels !== 'boolean') {

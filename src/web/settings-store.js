@@ -40,6 +40,12 @@ const DEFAULT_SETTINGS = Object.freeze({
   // 前端「模型管理」一键切换：开启则从 /v1/models 列表和调度（白名单）彻底排除。
   // 默认关闭以保持升级不改变现有行为；免费反代场景建议开启。
   blockPremiumModels: false,
+  // 「模型管理」列表只显示 Freebucks 计费模型（默认关闭 = 全显示）。
+  // 上游两本账并存：钱包计费模型（freebucks.prices，有 FB/h 单价，谁都能买）
+  // 与次数限流模型（rateLimitsByModel，premium/每日 次）。用户挑模型时通常只
+  // 关心「我买得起、且真能用的」，所以给一个纯前端过滤器把非计费行折叠掉。
+  // 只影响这一张表的展示，不改调度、不改白名单、不改 /v1/models。
+  modelListOnlyFreebucks: false,
   // 「低额度」分组阈值（FB）：余额低于它就在控制台归到「低额度」分组——**只是分组
   // 展示，不影响调度**（这些号照常参与选号，低额度不等于不能用）。默认 15 FB，
   // 0 = 关闭该分组。用户要的是「一眼看到快跑完的号」，所以阈值可调。
@@ -96,6 +102,9 @@ export class SettingsStore {
       }
       if (typeof raw?.blockPremiumModels === 'boolean') {
         this.settings.blockPremiumModels = raw.blockPremiumModels
+      }
+      if (typeof raw?.modelListOnlyFreebucks === 'boolean') {
+        this.settings.modelListOnlyFreebucks = raw.modelListOnlyFreebucks
       }
       if (Number.isInteger(raw?.lowBalanceThreshold)) {
         this.settings.lowBalanceThreshold = clampLowBalance(raw.lowBalanceThreshold)
@@ -166,6 +175,12 @@ export class SettingsStore {
         throw new TypeError('blockPremiumModels must be a boolean')
       }
       this.settings.blockPremiumModels = next.blockPremiumModels
+    }
+    if (next?.modelListOnlyFreebucks !== undefined) {
+      if (typeof next.modelListOnlyFreebucks !== 'boolean') {
+        throw new TypeError('modelListOnlyFreebucks must be a boolean')
+      }
+      this.settings.modelListOnlyFreebucks = next.modelListOnlyFreebucks
     }
     if (next?.lowBalanceThreshold !== undefined) {
       if (
