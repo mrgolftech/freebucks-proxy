@@ -2639,6 +2639,19 @@ for (const model of verifiedSpecialModels) {
     assert.equal(readAccountUser(wDir, 'w').enabled, false)
     assert.equal(readAccountUser(wDir, 'w').proxy, 'http://p1.example:7890')
     assert.equal(wruntimes.list().find((x) => x.key === 'w').status, 'disabled')
+    assert.equal(wruntimes.byKey.has('w'), false, '停用后 runtime 应立即从调度缓存摘除')
+
+    // 批量探测也必须尊重停用：不得因为点“探测刷新”就偷偷访问已停用账号。
+    const probeDisabled = await fetch(`http://127.0.0.1:${wport}/api/accounts/probe`, {
+      method: 'POST',
+      headers: { cookie },
+    })
+    assert.equal(probeDisabled.status, 200)
+    const probeDisabledBody = await probeDisabled.json()
+    const disabledProbeRow = probeDisabledBody.results.find((x) => x.key === 'w')
+    assert.equal(disabledProbeRow?.skipped, true)
+    assert.equal(disabledProbeRow?.code, 'disabled')
+    assert.equal(wruntimes.byKey.has('w'), false, '批量探测不得重新创建停用账号 runtime')
 
     const badEnabled = await fetch(`http://127.0.0.1:${wport}/api/accounts/w`, {
       method: 'PATCH',
