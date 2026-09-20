@@ -971,12 +971,35 @@ export function createWebApi(deps) {
       try {
         const rt = runtimes.get(key)
         const session = await rt.sessions.refresh()
+        // ⚠️ refresh() 返回的是**本地快照**（src/session-manager.js `_apply()` 用白名单
+        // 重建：status/instanceId/model/expiresAt/accessTier/raw…），上游的
+        // `rateLimitsByModel` 与 `freebucks` **不在里面**——它们被拆到了
+        // `quota.byModel` / `freebucks`，原文只留在 `session.raw`。谁直接读
+        // `session.rateLimitsByModel` 都会静默拿到 undefined（=0 个模型），
+        // 这正是「检测该账号」显示「可用 0 个模型」的原因。
+        // 所以回包里显式给出派生字段，消费方不需要知道快照的内部形状：
+        const snap = rt.sessions.getSnapshot()
+        const raw = session?.raw || session
+        const rateLimitsByModel = snap?.quota?.byModel || raw?.rateLimitsByModel || {}
+        const freebucks = snap?.freebucks || raw?.freebucks || null
+        // 「可用模型」与 /v1 白名单、/api/models/upstream 同源：限流表 ∪
+        // limitedModelOffers ∪ 当前 model ∪ freebucks 价格表。控制台报的数字
+        // 必须等于代理真正会放行的集合，否则又是「显示 0 但其实能用」。
+        const availableModelIds = modelIdsFromSession(raw)
         sendJson(res, 200, {
           ok: true,
           key,
           email: a.email,
           account: runtimes.list().find((x) => x.key === key),
           session,
+          rateLimitsByModel,
+          freebucks,
+          availableModelIds,
+          modelCounts: {
+            available: availableModelIds.length,
+            rateLimited: Object.keys(rateLimitsByModel).length,
+            walletBilled: Object.keys(freebucks?.prices || {}).length,
+          },
           note: '只读探测，未创建 session',
         })
       } catch (err) {

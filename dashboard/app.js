@@ -1188,13 +1188,27 @@ async function probeAccount(a, btn) {
   try {
     const r = await api(`/api/accounts/${encodeURIComponent(a.key)}/probe`, { method: 'POST' })
     const sess = r.session || {}
-    const limits = sess.rateLimitsByModel || {}
-    const modelCount = Object.keys(limits).length
+    // ⚠️ 后端回包的 session 是**本地快照**：`_apply()` 用白名单重建（只留
+    // status/instanceId/model/expiresAt/accessTier/raw），上游的 rateLimitsByModel
+    // 与 freebucks 都不在里面（分别在 quota.byModel / raw 下）。旧代码直接读
+    // `sess.rateLimitsByModel` → 恒为 undefined → 永远显示「可用 0 个模型」。
+    // 现在优先读后端显式给出的派生字段，并按快照/原文逐级兜底（兼容旧后端）。
+    const limits = r.rateLimitsByModel || r.account?.quota?.byModel || sess?.raw?.rateLimitsByModel || {}
+    const prices = r.freebucks?.prices || sess?.raw?.freebucks?.prices || {}
+    const walletIds = Object.keys(prices)
+    // 「可用模型」= 代理真正会放行的集合（后端 modelIdsFromSession 与 /v1 白名单同源）；
+    // 拿不到该字段时退化成「限流表 ∪ 价格表 ∪ 当前会话模型」。
+    const available = Array.isArray(r.availableModelIds) && r.availableModelIds.length
+      ? r.availableModelIds
+      : [...new Set([...Object.keys(limits), ...walletIds, ...(sess?.model ? [sess.model] : [])])]
+    const modelCount = available.length
     if (r.ok) {
       const models = Object.entries(limits)
         .map(([id, info]) => `${shortModel(id)} ${fmtNum(info?.recentCount)}/${info?.limit ?? '?'}`)
         .join(' · ')
-      toast(`✅ ${a.email} 可用 · ${modelCount} 个模型${models ? '：' + models : ''}`)
+      // 两本账分开报：N 是并集（去重后），次数额度/钱包计费各自的数量会重叠。
+      const breakdown = `次数额度 ${Object.keys(limits).length} · 钱包计费 ${walletIds.length}`
+      toast(`✅ ${a.email} 可用 · ${modelCount} 个模型（${breakdown}）${models ? '：' + models : ''}`)
       await refreshAccountsCard()
     } else {
       const code = r.code || sess?.status || sess?.error || r.error || '未知'
