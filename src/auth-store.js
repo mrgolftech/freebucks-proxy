@@ -360,7 +360,19 @@ export function freebuffAuthHeaders(token) {
   }
 }
 
-export function generateFingerprintId() {
+/**
+ * 生成 CLI 登录 fingerprintId。
+ *
+ * 默认（scope 为空）保持历史/CLI 行为：同一台机器稳定得到同一个指纹。
+ * Web 多账号登录可以传入一个“登录隔离 scope”（通常为 flow id），这样：
+ *   - 同一登录流程的 code/status 轮询始终复用同一个 fingerprintId；
+ *   - 不同账号的首次登录不会因为都跑在同一容器里而天然共用同一个设备 ID；
+ *   - scope 会随凭据一起保存，后续不会在单次登录过程中随机漂移。
+ *
+ * 这里不是每个请求随机化：请求级随机反而会制造异常设备漂移。
+ * @param {string | null} [scope]
+ */
+export function generateFingerprintId(scope = null) {
   const parts = [
     os.hostname(),
     os.platform(),
@@ -379,6 +391,9 @@ export function generateFingerprintId() {
     }
   }
   parts.push(...macs.sort())
+  if (typeof scope === 'string' && scope.trim()) {
+    parts.push(`scope:${scope.trim()}`)
+  }
   const hash = createHash('sha256').update(parts.join('|')).digest('base64url')
   return `enhanced-${hash}`
 }
