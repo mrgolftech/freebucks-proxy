@@ -15,6 +15,7 @@ import {
   requireModelId,
   isFreeModel,
   buildModelsListResponse,
+  modelIdsFromSession,
   agentIdForModel,
   agentFallbackForModel,
   CATALOG_CACHE_FILENAME,
@@ -81,6 +82,31 @@ configureLogger({ level: 'error' })
   assert.doesNotThrow(
     () => new Function(dashboardJs),
     'dashboard/app.js must remain syntactically valid',
+  )
+}
+
+// --- unit: Freebucks 价格表模型必须进入统一目录，且按计费会话调度 ---
+{
+  const ids = modelIdsFromSession({
+    model: 'vendor/current',
+    rateLimitsByModel: { 'vendor/limited': { limit: 1 } },
+    limitedModelOffers: [{ model: 'vendor/offer' }],
+    freebucks: {
+      prices: {
+        'vendor/paid-only': 10,
+        'vendor/invalid': 'not-a-number',
+      },
+    },
+  })
+  assert.ok(ids.includes('vendor/current'))
+  assert.ok(ids.includes('vendor/limited'))
+  assert.ok(ids.includes('vendor/offer'))
+  assert.ok(ids.includes('vendor/paid-only'), '仅在 freebucks.prices 出现的模型必须进入统一目录')
+  assert.ok(!ids.includes('vendor/invalid'), '非法价格不得把模型误加入目录')
+  assert.equal(
+    isFreeModel('vendor/paid-only', [{ id: 'vendor/paid-only', pool: 'freebucks' }]),
+    false,
+    'Freebucks 钱包模型每次 admit 都计费，必须走付费会话复用策略',
   )
 }
 
@@ -230,6 +256,27 @@ let sessionExpiryMs = 3600_000
  * @type {null | { balance: number, daily?: any, wallet?: any, prices?: Record<string, number>, quotaExempt?: boolean, planId?: string | null }}
  */
 let mockFreebucks = null
+/** 可按 auth token 覆盖 Freebucks 响应（多账号价格表并集测试用）。 */
+let mockFreebucksByToken = null
+
+function mockFreebucksPayload(headers = {}) {
+  const auth = String(
+    headers.Authorization ||
+      headers.authorization ||
+      headers['x-codebuff-api-key'] ||
+      '',
+  )
+  let fb = mockFreebucks
+  if (mockFreebucksByToken && typeof mockFreebucksByToken === 'object') {
+    for (const [needle, value] of Object.entries(mockFreebucksByToken)) {
+      if (auth.includes(needle)) {
+        fb = value
+        break
+      }
+    }
+  }
+  return fb ? { freebucks: fb } : {}
+}
 
 /** 每次 DELETE 退还给调用方的 Freebucks（模拟"提前结束退款"）。 */
 let mockRefund = 1.5
@@ -326,14 +373,14 @@ globalThis.fetch = async (url, init = {}) => {
       accessTier: 'full',
       rateLimit,
       rateLimitsByModel: { [model]: rateLimit },
-      ...(mockFreebucks ? { freebucks: mockFreebucks } : {}),
+      ...mockFreebucksPayload(headers),
     })
   }
   if (u.includes('/api/v1/freebuff/session') && method === 'GET') {
     return jsonRes({
       status: 'none',
       accessTier: 'full',
-      ...(mockFreebucks ? { freebucks: mockFreebucks } : {}),
+      ...mockFreebucksPayload(headers),
     })
   }
   if (u.includes('/api/v1/freebuff/session') && method === 'DELETE') {
@@ -356,7 +403,7 @@ globalThis.fetch = async (url, init = {}) => {
       status: 'ended',
       ...(mockRefundPending ? { freebucksRefundPending: true } : {}),
       ...(mockRefundPending ? {} : { freebucksRefund: mockRefund }),
-      ...(mockFreebucks ? { freebucks: mockFreebucks } : {}),
+      ...mockFreebucksPayload(headers),
     })
   }
   if (u.includes('/api/v1/agent-runs') && method === 'POST') {
@@ -2521,6 +2568,25 @@ for (const model of verifiedSpecialModels) {
         .freeToolSignatureEnabled,
       false,
     )
+
+    // v1.16.2+ 模型列表过滤偏好：布尔校验 + 持久化往返。
+    const invalidModelFilter = await fetch(`http://127.0.0.1:${wport}/api/settings`, {
+      method: 'POST',
+      headers: { cookie, 'content-type': 'application/json' },
+      body: JSON.stringify({ modelListOnlyFreebucks: 'yes' }),
+    })
+    assert.equal(invalidModelFilter.status, 400)
+    const saveModelFilter = await fetch(`http://127.0.0.1:${wport}/api/settings`, {
+      method: 'POST',
+      headers: { cookie, 'content-type': 'application/json' },
+      body: JSON.stringify({ modelListOnlyFreebucks: true }),
+    })
+    assert.equal(saveModelFilter.status, 200)
+    assert.equal((await saveModelFilter.json()).modelListOnlyFreebucks, true)
+    assert.equal(
+      new SettingsStore(path.join(wDir, 'settings.json')).get().modelListOnlyFreebucks,
+      true,
+    )
   }
   // 运行设置：账号并发上限（粘性调度）——默认 2，校验非法值，保存后持久化
   {
@@ -2678,6 +2744,19 @@ for (const model of verifiedSpecialModels) {
     assert.equal(disabledProbeRow?.code, 'disabled')
     assert.equal(wruntimes.byKey.has('w'), false, '批量探测不得重新创建停用账号 runtime')
 
+    // 一键刷新末尾还会刷新模型目录；这里必须同样跳过 disabled，不能在第二阶段
+    // 又通过 probeAllAccountsSession() 把停用 runtime 偷偷建回来。
+    const refreshDisabled = await fetch(`http://127.0.0.1:${wport}/api/accounts/refresh`, {
+      method: 'POST',
+      headers: { cookie },
+    })
+    assert.equal(refreshDisabled.status, 200)
+    const refreshDisabledBody = await refreshDisabled.json()
+    const disabledRefreshRow = refreshDisabledBody.results.find((x) => x.key === 'w')
+    assert.equal(disabledRefreshRow?.skipped, true)
+    assert.equal(disabledRefreshRow?.code, 'disabled')
+    assert.equal(wruntimes.byKey.has('w'), false, '一键刷新模型目录也不得触碰停用账号')
+
     const badEnabled = await fetch(`http://127.0.0.1:${wport}/api/accounts/w`, {
       method: 'PATCH',
       headers: { cookie, 'content-type': 'application/json' },
@@ -2789,6 +2868,114 @@ for (const model of verifiedSpecialModels) {
   await wruntimes.shutdown()
   wserver.close()
   fs.rmSync(wDir, { recursive: true, force: true })
+}
+
+// --- 多账号模型目录：prices 取并集、fresh 真刷新、/v1/models 与 Web 同源 ---
+{
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fb-proxy-model-union-'))
+  saveAccountUser(dir, { id: 'ma', email: 'ma@example.com', authToken: 'token-ma' })
+  saveAccountUser(dir, { id: 'mb', email: 'mb@example.com', authToken: 'token-mb' })
+  const cfg = loadConfig()
+  cfg.server.host = '127.0.0.1'
+  cfg.server.port = 0
+  cfg.server.apiKeys = ['sk-model-union']
+  cfg.upstream.credentialsDir = dir
+  cfg.session.pollIntervalSec = 3600
+
+  const users = new UserStore(path.join(dir, 'users.json'))
+  const webSessions2 = new WebSessionStore(path.join(dir, 'web-sessions.json'), 3600_000)
+  users.create({ username: 'admin', password: 'secret123', role: 'admin' })
+  const flows = new LoginFlowManager({
+    file: path.join(dir, 'login-flows.json'),
+    credentialsDir: dir,
+    config: cfg,
+  })
+  const proxies = new ProxyStore(path.join(dir, 'proxies.json'))
+  const settings = new SettingsStore(path.join(dir, 'settings.json'))
+  const models = new ModelStore(path.join(dir, 'custom-models.json'))
+  const pool = new AccountRuntimes(cfg)
+
+  mockFreebucksByToken = {
+    'token-ma': {
+      balance: 100,
+      prices: { 'vendor/a-only': 5, 'vendor/shared': 7 },
+    },
+    'token-mb': {
+      balance: 100,
+      prices: { 'vendor/b-only': 10, 'vendor/shared': 9 },
+    },
+  }
+
+  const server = await startServer({
+    config: cfg,
+    runtimes: pool,
+    authToken: null,
+    authSource: null,
+    authEmail: null,
+    upstream: null,
+    sessions: null,
+    userStore: users,
+    webSessions: webSessions2,
+    loginFlows: flows,
+    proxyStore: proxies,
+    settingsStore: settings,
+    modelStore: models,
+  })
+  const port = server.address().port
+  const login = await fetch(`http://127.0.0.1:${port}/api/auth/login`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ username: 'admin', password: 'secret123' }),
+  })
+  const cookie2 = login.headers.get('set-cookie').split(';')[0]
+
+  const fresh1 = await fetch(`http://127.0.0.1:${port}/api/models/upstream?fresh=1`, {
+    headers: { cookie: cookie2 },
+  })
+  assert.equal(fresh1.status, 200)
+  const body1 = await fresh1.json()
+  assert.ok(body1.freebucksModelIds.includes('vendor/a-only'))
+  assert.ok(body1.freebucksModelIds.includes('vendor/b-only'))
+  assert.ok(body1.models.some((m) => m.id === 'vendor/a-only' && m.freebucksBilled === true))
+  assert.ok(body1.models.some((m) => m.id === 'vendor/b-only' && m.freebucksBilled === true))
+  assert.equal(
+    body1.models.find((m) => m.id === 'vendor/shared')?.freebucksPerHour,
+    9,
+    '跨账号价格冲突应保守取较高值',
+  )
+
+  // 普通 GET 命中 60s 缓存；fresh=1 必须绕开缓存并吸收新价格模型。
+  mockFreebucksByToken['token-mb'] = {
+    balance: 100,
+    prices: { 'vendor/b-only': 10, 'vendor/shared': 9, 'vendor/new-after-cache': 12 },
+  }
+  const cached = await fetch(`http://127.0.0.1:${port}/api/models/upstream`, {
+    headers: { cookie: cookie2 },
+  })
+  assert.ok(!(await cached.json()).freebucksModelIds.includes('vendor/new-after-cache'))
+
+  const fresh2 = await fetch(`http://127.0.0.1:${port}/api/models/upstream?fresh=1`, {
+    headers: { cookie: cookie2 },
+  })
+  const body2 = await fresh2.json()
+  assert.ok(body2.freebucksModelIds.includes('vendor/new-after-cache'))
+
+  // Web fresh 写入共享 runtimes 后，OpenAI /v1/models 必须看到两个账号价格表的并集。
+  const v1 = await fetch(`http://127.0.0.1:${port}/v1/models`, {
+    headers: { authorization: 'Bearer sk-model-union' },
+  })
+  assert.equal(v1.status, 200)
+  const v1Body = await v1.json()
+  const v1Ids = new Set((v1Body.data || []).map((m) => m.id))
+  assert.ok(v1Ids.has('vendor/a-only'))
+  assert.ok(v1Ids.has('vendor/b-only'))
+  assert.ok(v1Ids.has('vendor/new-after-cache'))
+
+  mockFreebucksByToken = null
+  flows.shutdown()
+  await pool.shutdown()
+  server.close()
+  fs.rmSync(dir, { recursive: true, force: true })
 }
 
 // --- quota: extraction + display；已用满的冷账号排到可用冷账号之后 ---
@@ -4521,6 +4708,11 @@ for (const model of verifiedSpecialModels) {
   assert.equal(isFreeModel('mimo/mimo-v2.5'), true)
   assert.equal(isFreeModel('deepseek/deepseek-v4-pro'), false)
   assert.equal(isFreeModel('openai/gpt-5.6-luna'), false)
+  assert.equal(
+    isFreeModel('vendor/freebucks-only', [{ id: 'vendor/freebucks-only', pool: 'freebucks' }]),
+    false,
+    'Freebucks 钱包计费模型应按付费会话策略复用',
+  )
   assert.equal(isFreeModel('unknown/vendor-model'), true)
 
   // 免费模型：会话剩余 4 分钟（< 5 分钟阈值）→ 不再可用，提前 re-admit 换新会话
