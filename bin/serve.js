@@ -377,9 +377,17 @@ async function main() {
           })
         })
     } else {
-      logger.info('no Freebuff accounts yet — add one from the web console', {
-        credentialsDir: ctx.runtimes.dir,
-      })
+      const rows = ctx.runtimes.list()
+      logger.info(
+        rows.length
+          ? 'all Freebuff accounts are manually disabled — web console remains available'
+          : 'no Freebuff accounts yet — add one from the web console',
+        {
+          credentialsDir: ctx.runtimes.dir,
+          accounts: rows.length,
+          enabled: rows.filter((a) => a.enabled !== false).length,
+        },
+      )
     }
   }
 
