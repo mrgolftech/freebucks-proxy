@@ -6,7 +6,7 @@ import {
   serializeCookie,
 } from '../util/http.js'
 import { ProxyAgent, fetch as undiciFetch } from 'undici'
-import { buildModelsListResponse, agentIdForModel, agentFallbackForModel } from '../model.js'
+import { buildModelsListResponse, modelIdsFromSession, agentIdForModel, agentFallbackForModel } from '../model.js'
 import {
   saveAccountUser,
   coerceUser,
@@ -125,24 +125,56 @@ export function createWebApi(deps) {
    * 单个账号失败不影响其它账号：失败记进 failures，不整体报错。
    */
   async function probeAllAccountsSession() {
-    const rows = runtimes.list()
-    if (!rows.length) return { session: null, failures: [] }
+    // 手工停用账号是硬调度闸门：批量目录刷新也不得重新创建 runtime / 主动碰上游。
+    const rows = runtimes.list().filter((row) => row.enabled !== false)
+    if (!rows.length) {
+      upstreamSessionCache = null
+      return { session: null, failures: [] }
+    }
     const failures = []
     /** @type {Map<string, any>} */
     const limits = new Map()
+    /** @type {Map<string, number>} */
+    const prices = new Map()
     let base = null
+    let baseFreebucks = null
     for (const row of rows) {
+      // 双保险：凭据可能在 list() 之后被用户即时停用。
+      if (typeof runtimes.isEnabled === 'function' && !runtimes.isEnabled(row.key)) continue
       try {
         const rt = runtimes.get(row.key)
         const s = await rt.sessions.refresh()
+        const snap = rt.sessions.getSnapshot()
         if (!base) base = s
+        if (!baseFreebucks && snap?.freebucks) baseFreebucks = snap.freebucks
+
         // ⚠️ refresh() 返回的是**本地 session 快照**（status/instanceId/expiresAt…），
         // 不含上游的 rateLimitsByModel —— 额度在 quota.byModel 上（_apply 里由
         // extractQuota 解析）。取错字段的表现是"永远 0 个模型"，正是这里踩到的。
-        const byModel = rt.sessions.getSnapshot()?.quota?.byModel || {}
+        const byModel = snap?.quota?.byModel || {}
         for (const [id, info] of Object.entries(byModel)) {
           if (!limits.has(id) || (info?.limit ?? 0) > (limits.get(id)?.limit ?? 0)) {
             limits.set(id, info)
+          }
+        }
+
+        // Freebucks 价格表同样按账号池取并集。正常情况下各账号价格相同；若上游
+        // 灰度导致同一模型价格不一致，取较高值做保守展示/余额判断，并记录告警。
+        const accountPrices = snap?.freebucks?.prices || {}
+        for (const [id, rawPrice] of Object.entries(accountPrices)) {
+          const price = Number(rawPrice)
+          if (!Number.isFinite(price)) continue
+          if (prices.has(id) && prices.get(id) !== price) {
+            const previous = prices.get(id)
+            logger.warn('freebucks price differs across accounts; using conservative max', {
+              model: id,
+              previous,
+              current: price,
+              account: row.key,
+            })
+            prices.set(id, Math.max(previous, price))
+          } else {
+            prices.set(id, price)
           }
         }
       } catch (err) {
@@ -154,11 +186,27 @@ export function createWebApi(deps) {
         })
       }
     }
-    if (!base && !limits.size) return { session: null, failures }
+    if (!base && !limits.size && !prices.size) {
+      upstreamSessionCache = null
+      return { session: null, failures }
+    }
+    const mergedPrices = Object.fromEntries(prices)
+    const freebucks =
+      baseFreebucks || prices.size
+        ? {
+            ...(baseFreebucks || {}),
+            prices: mergedPrices,
+          }
+        : null
     const session = {
       ...(base || {}),
       rateLimitsByModel: Object.fromEntries(limits),
-      model: base?.model || [...limits.keys()][0] || null,
+      freebucks,
+      model:
+        base?.model ||
+        [...limits.keys()][0] ||
+        [...prices.keys()][0] ||
+        null,
     }
     upstreamSessionCache = { data: session, at: Date.now() }
     return { session, failures }
@@ -388,10 +436,9 @@ export function createWebApi(deps) {
       if (session?.accessTier === 'full' || session?.accessTier === 'limited') {
         accessTier = session.accessTier
       }
-      extraIds = (session?.rateLimitsByModel
-        ? Object.keys(session.rateLimitsByModel)
-        : []
-      ).concat(session?.model ? [session.model] : [])
+      // 统一目录口径：rateLimits / limited offers / 当前模型 / Freebucks
+      // 价格表都由 modelIdsFromSession() 汇总，避免 Web 看得到但 /api/models 漏掉。
+      extraIds = modelIdsFromSession(session)
       sendJson(
         res,
         200,
@@ -516,13 +563,20 @@ export function createWebApi(deps) {
 
     // 上游模型探测：读上游 rateLimitsByModel 目录（走 60s 缓存，不创建 session、不占额度）。
     if (method === 'GET' && route === '/api/models/upstream') {
-      const accounts = runtimes.list()
+      const accounts = runtimes.list().filter((row) => row.enabled !== false)
       if (!accounts.length) {
-        sendJson(res, 200, { models: [], note: '没有账号，无法探测上游' })
+        sendJson(res, 200, { models: [], note: '没有启用账号，无法探测上游' })
         return true
       }
       try {
-        const session = await probeUpstreamSession()
+        // 普通模型管理页沿用 60s 缓存；“同步上游模型”显式带 fresh=1，
+        // 必须强制逐个启用账号刷新并合并两本账，不能拿一分钟前的缓存冒充同步。
+        const fresh = ['1', 'true', 'yes'].includes(
+          String(url.searchParams.get('fresh') || '').toLowerCase(),
+        )
+        const session = fresh
+          ? (await probeAllAccountsSession()).session
+          : await probeUpstreamSession()
         const limits = session?.rateLimitsByModel || {}
         // 模型单价（Freebucks/小时）：上游按会话实际占用时长结算，这正是控制台
         // 在「额度」列要展示的口径——旧的「已用/上限 次数」已不符合计费方式。

@@ -255,9 +255,15 @@ export function deriveAgentId(modelId) {
  */
 export function isFreeModel(modelId, customModels) {
   const cm = (customModels || []).find((x) => x && x.id === modelId)
-  if (cm) return (cm.pool || 'daily') !== 'premium'
+  if (cm) {
+    const pool = cm.pool || 'daily'
+    // premium = 上游订阅收费/免费账号不可用；freebucks = 钱包按会话买断一小时。
+    // 二者都不应走“免费模型”的提前 re-admit / 激进分散策略，尤其 freebucks
+    // 每次 admit 都会重新扣一条会话费用，必须优先复用热 session。
+    return pool !== 'premium' && pool !== 'freebucks'
+  }
   const m = FREEBUFF_AVAILABLE_MODELS.find((x) => x.id === modelId)
-  return !m || m.pool !== 'premium'
+  return !m || (m.pool !== 'premium' && m.pool !== 'freebucks')
 }
 
 /**
@@ -384,6 +390,15 @@ export function modelIdsFromSession(session) {
   if (Array.isArray(offers)) {
     for (const o of offers) {
       if (o && typeof o.model === 'string') ids.add(o.model)
+    }
+  }
+  // Freebucks 钱包价格表也是“当前可购买模型”的权威来源。部分模型只在
+  // freebucks.prices 里出现、完全没有 rateLimitsByModel 行；如果这里漏掉，
+  // Web 模型管理会看得到，但 /v1/models 与未知模型白名单仍会拒绝它。
+  const prices = session.freebucks?.prices
+  if (prices && typeof prices === 'object') {
+    for (const [id, price] of Object.entries(prices)) {
+      if (Number.isFinite(Number(price))) ids.add(id)
     }
   }
   return [...ids]
