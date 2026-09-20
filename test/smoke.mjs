@@ -8,9 +8,10 @@ import { loadConfig } from '../src/config.js'
 import { AccountRuntimes, buildAppContext } from '../src/app-context.js'
 import { SessionHandleStore } from '../src/session-handles.js'
 import { startServer } from '../src/server.js'
-import { SessionManager } from '../src/session-manager.js'
+import { SessionManager, extractSessionEntitlements } from '../src/session-manager.js'
 import { requestSlotStats } from '../src/proxy.js'
 import { configureLogger } from '../src/util/log.js'
+import { validateStrictToolsRequest } from '../src/strict-tools.js'
 import {
   requireModelId,
   isFreeModel,
@@ -24,6 +25,7 @@ import {
   configureCatalogCache,
   applyCatalogCache,
   mergeCatalogWithBuiltin,
+  modelAdmissionState,
 } from '../src/model.js'
 import {
   saveAccountUser,
@@ -121,6 +123,44 @@ configureLogger({ level: 'error' })
   )
 }
 
+// --- dashboard: tier/offer/admission 可视化必须跟随后端状态 ---
+{
+  const dashboardJs = fs.readFileSync(
+    path.join(process.cwd(), 'dashboard', 'app.js'),
+    'utf8',
+  )
+  const apiSrc = fs.readFileSync(
+    path.join(process.cwd(), 'src', 'web', 'api.js'),
+    'utf8',
+  )
+  assert.ok(
+    dashboardJs.includes('function accountEntitlementCell(a)'),
+    '账号表必须展示 accessTier/subscription/offer，而不是只在后端保存',
+  )
+  assert.ok(
+    dashboardJs.includes("'模型冷却 ' + modelCooldowns.length"),
+    '账号授权列必须展示 per-model 429 refusal memory，避免误以为整号不可用',
+  )
+  assert.ok(
+    dashboardJs.includes('function modelAdmissionCell(m)'),
+    '模型管理必须展示 plan_required/offer/trial/withdrawn 等准入状态',
+  )
+  assert.ok(
+    dashboardJs.includes("liveCatalog = await api('/api/models')"),
+    '模型管理必须读取 entitlement-aware /api/models，而不是只看价格表',
+  )
+  assert.ok(
+    apiSrc.includes('modelAdmissionState(id, admissionOpts)'),
+    '/api/models/upstream 必须把已验证的准入状态一起返回给前端',
+  )
+  assert.ok(
+    apiSrc.includes('subscriptionTierId:') &&
+      apiSrc.includes('limitedOffers:') &&
+      apiSrc.includes('limitedOfferReason:'),
+    '/api/models 必须把 subscription/offer 上下文传给模型准入计算',
+  )
+}
+
 // --- unit: Freebucks 价格表模型必须进入统一目录，且按计费会话调度 ---
 {
   const ids = modelIdsFromSession({
@@ -144,6 +184,122 @@ configureLogger({ level: 'error' })
     false,
     'Freebucks 钱包模型每次 admit 都计费，必须走付费会话复用策略',
   )
+}
+
+
+// --- unit: tier / offer / withdrawn state (trefeon #665 parity) ---
+{
+  const ent = extractSessionEntitlements({
+    accessTier: 'limited',
+    subscription: { tierId: 'pro', status: 'active', blockedBy: 'premium_daily' },
+    limitedModelOffers: [
+      { model: 'anthropic/claude-fable-5.1', remaining: 3, total: 10, userRemaining: 1 },
+    ],
+    limitedOfferReason: 'wave_open',
+  })
+  assert.equal(ent.accessTier, 'limited')
+  assert.equal(ent.subscription.tierId, 'pro')
+  assert.equal(ent.subscription.blockedBy, 'premium_daily')
+  assert.equal(ent.limitedModelOffers[0].userRemaining, 1)
+  assert.equal(ent.limitedOfferReason, 'wave_open')
+
+  let state = modelAdmissionState('google/gemini-3.8-flash', {
+    accessTier: 'full',
+    subscriptionTierId: null,
+  })
+  assert.equal(state.admissible, false)
+  assert.equal(state.status, 'plan_required')
+
+  state = modelAdmissionState('google/gemini-3.8-flash', {
+    accessTier: 'full',
+    subscriptionTierId: 'pro',
+  })
+  assert.equal(state.admissible, true)
+  assert.equal(state.status, 'available')
+
+  state = modelAdmissionState('anthropic/claude-fable-5.1', {
+    accessTier: 'full',
+    limitedOffers: [],
+  })
+  assert.equal(state.status, 'offer_unavailable')
+
+  state = modelAdmissionState('anthropic/claude-fable-5.1', {
+    limitedOffers: [
+      { model: 'anthropic/claude-fable-5.1', remaining: 2, total: 10, userRemaining: 0 },
+    ],
+  })
+  assert.equal(state.status, 'trial_used')
+
+  state = modelAdmissionState('anthropic/claude-fable-5.1', {
+    limitedOffers: [
+      { model: 'anthropic/claude-fable-5.1', remaining: 2, total: 10, userRemaining: 1 },
+    ],
+  })
+  assert.equal(state.admissible, true)
+  assert.equal(state.offer.joinable, true)
+
+  state = modelAdmissionState('deepseek/deepseek-v4-pro')
+  assert.equal(state.status, 'withdrawn')
+  assert.equal(state.replacement, 'z-ai/glm-5.3-flash')
+}
+
+// --- unit: smart probe is read-only for the live session handle (#644 pattern) ---
+{
+  let calls = 0
+  const sm = new SessionManager({
+    upstream: {
+      freebuffSession: async (method, opts = {}) => {
+        calls += 1
+        assert.equal(method, 'GET')
+        assert.equal(opts.instanceId, undefined, 'smart probe must be session-less')
+        return {
+          status: 'none',
+          accessTier: 'full',
+          subscription: { tierId: 'pro', status: 'active' },
+          limitedModelOffers: [],
+          rateLimitsByModel: {
+            'z-ai/glm-5.3-flash': {
+              model: 'z-ai/glm-5.3-flash',
+              limit: 5,
+              recentCount: 1,
+              resetAt: new Date(Date.now() + 60_000).toISOString(),
+            },
+          },
+          freebucks: {
+            balance: 8,
+            daily: {
+              limit: 10,
+              spent: 2,
+              remaining: 8,
+              resetAt: new Date(Date.now() + 60_000).toISOString(),
+            },
+            wallet: { balance: 0, monthlyBonus: 0 },
+            prices: { 'openai/gpt-5.6-luna': 5 },
+            quotaExempt: false,
+            planId: null,
+            priceChanges: [],
+          },
+        }
+      },
+    },
+    config: {
+      session: { pollIntervalSec: 30, idleReleaseSec: 0 },
+      limits: {},
+    },
+  })
+  sm.session = {
+    status: 'active',
+    instanceId: 'keep-me',
+    model: 'z-ai/glm-5.3-flash',
+    expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+  }
+  await sm._runSmartProbe()
+  assert.equal(calls, 1)
+  assert.equal(sm.session.instanceId, 'keep-me', 'read-only probe must never overwrite live handle')
+  assert.equal(sm.entitlements.subscription.tierId, 'pro')
+  assert.equal(sm.quota.byModel['z-ai/glm-5.3-flash'].recentCount, 1)
+  assert.equal(sm.freebucks.balance, 8)
+  sm._clearSmartProbe()
 }
 
 // --- unit: CLI 登录指纹：默认主机指纹稳定；Web flow scope 隔离且流程内稳定 ---
@@ -1793,8 +1949,19 @@ for (const model of verifiedSpecialModels) {
   assert.ok(sessionPosts >= 2)
   const accounts = multiRuntimes.list()
   const a = accounts.find((x) => x.email === 'a@example.com')
-  assert.equal(a.available, false)
-  assert.equal(a.cooldownCode, 'rate_limited')
+  // #624 semantics: this 429 carried a retry window for the requested model,
+  // so A stays globally healthy and only A+deepseek is parked.
+  assert.equal(a.available, true)
+  assert.equal(a.cooldownCode, null)
+  assert.equal(a.modelCooldowns.length, 1)
+  assert.equal(a.modelCooldowns[0].model, 'deepseek/deepseek-v4-flash')
+  assert.equal(a.modelCooldowns[0].code, 'rate_limited')
+  assert.ok(
+    multiRuntimes
+      .candidateKeys('mimo/mimo-v2.5')
+      .includes(a.key),
+    'A must remain eligible for a different model',
+  )
   // quota from admit is surfaced on the row
   const b = accounts.find((x) => x.email === 'b@example.com')
   assert.equal(b.quota.byModel['deepseek/deepseek-v4-flash'].limit, 6)
@@ -3012,6 +3179,66 @@ for (const model of verifiedSpecialModels) {
   await pool.shutdown()
   server.close()
   fs.rmSync(dir, { recursive: true, force: true })
+}
+
+// --- trefeon #624: expiring 429 memory is per account+model, opaque 429 is not sticky ---
+{
+  const rlDir = fs.mkdtempSync(path.join(os.tmpdir(), 'fb-proxy-model-429-'))
+  saveAccountUser(rlDir, { id: 'ra', email: 'ra@example.com', authToken: 'token-ra' })
+  saveAccountUser(rlDir, { id: 'rb', email: 'rb@example.com', authToken: 'token-rb' })
+  const rlConfig = loadConfig()
+  rlConfig.upstream.credentialsDir = rlDir
+  rlConfig.session.pollIntervalSec = 3600
+  const pool = new AccountRuntimes(rlConfig)
+
+  const modelA = 'deepseek/deepseek-v4-flash'
+  const modelB = 'mimo/mimo-v2.5'
+
+  // Explicit refusal window: only ra+modelA is parked.
+  const remembered = pool.markCooldown(
+    'ra',
+    {
+      code: 'rate_limited',
+      retryAfterMs: 60_000,
+    },
+    modelA,
+  )
+  assert.equal(remembered.remembered, true)
+  assert.equal(remembered.scope, 'model')
+  assert.deepEqual(
+    pool.candidateKeys(modelA),
+    ['rb'],
+    'same model must skip the remembered lane with no upstream contact',
+  )
+  assert.deepEqual(
+    pool.candidateKeys(modelB),
+    ['ra', 'rb'],
+    'different model must still be allowed on the same account',
+  )
+  const rowA = pool.list().find((x) => x.key === 'ra')
+  assert.equal(rowA.available, true, 'model cooldown must not mark the whole account unavailable')
+  assert.equal(rowA.modelCooldowns.length, 1)
+  assert.equal(rowA.modelCooldowns[0].model, modelA)
+  assert.equal(rowA.modelCooldowns[0].code, 'rate_limited')
+
+  // Explicitly clearing that model revives only that lane.
+  pool.clearCooldown('ra', modelA)
+  assert.deepEqual(pool.candidateKeys(modelA), ['ra', 'rb'])
+
+  // Opaque 429: never persist a cooldown. Current-request failover is handled
+  // through skipKeys in reacquireAfterGate; a later request probes live again.
+  const opaque = pool.markCooldown('ra', { code: 'rate_limited' }, modelA)
+  assert.equal(opaque.remembered, false)
+  assert.equal(pool.isCoolingDown('ra', modelA), false)
+  assert.deepEqual(pool.candidateKeys(modelA), ['ra', 'rb'])
+
+  // Account-level 429 without a model retains legacy whole-account behavior.
+  pool.markCooldown('ra', { code: 'rate_limited', retryAfterMs: 60_000 })
+  assert.equal(pool.isCoolingDown('ra'), true)
+  assert.deepEqual(pool.candidateKeys(modelB), ['rb'])
+
+  await pool.shutdown()
+  fs.rmSync(rlDir, { recursive: true, force: true })
 }
 
 // --- quota: extraction + display；已用满的冷账号排到可用冷账号之后 ---
@@ -5961,6 +6188,37 @@ server.close()
   const poor = sm.freebucksFor(model)
   assert.equal(poor.affordable, false, '余额 < 单价 必须拦——上游封号条件②')
   assert.equal(poor.reason, 'balance_shortfall', '必须标明是余额不足')
+
+  // 官方当前 wire: claimableGrantFreebucks 可参与 admission 支付。
+  sm.freebucks = {
+    balance: 10,
+    claimableGrantFreebucks: 20,
+    daily: { limit: 85, spent: 20, remaining: 65, resetAt: null },
+    wallet: { balance: 0 },
+    prices: { [model]: price },
+    quotaExempt: false,
+    monthly: null,
+  }
+  const grant = sm.freebucksFor(model)
+  assert.equal(grant.affordable, true, 'balance + claimable grant 足够时必须放行')
+  assert.equal(grant.spendable, 30)
+  assert.equal(grant.claimableGrantFreebucks, 20)
+
+  // 官方已将 legacy monthly provider-spend cap 标为 deprecated：保留展示，
+  // 但不能因为旧快照 remainingUsd=0 就本地拒绝一次当前报价允许的 admission。
+  sm.freebucks = {
+    balance: 100,
+    daily: { limit: 85, spent: 20, remaining: 65, resetAt: null },
+    wallet: { balance: 0 },
+    prices: { [model]: price },
+    quotaExempt: false,
+    monthly: { remainingUsd: 0, resetAt: null },
+  }
+  assert.equal(
+    sm.freebucksFor(model).affordable,
+    true,
+    'deprecated monthly 快照不得继续充当 admission 硬闸门',
+  )
 
   // 两条都不命中 → 放行（不能误伤正常账号）
   sm.freebucks = {

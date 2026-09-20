@@ -838,7 +838,7 @@ function sectionOpen(section) {
 function buildAccountSection(section, rows) {
   const table = el('div', { class: 'table-wrap' }, [
     el('table', {}, [
-      el('thead', {}, el('tr', {}, ['账号', '启用', '状态', 'Session', '并发', '时间轴（导入/更新/调度）', '额度（今日 · FB/h）', 'Freebucks', '请求', '冷却', '出口', '操作'].map((t) => el('th', {}, t)))),
+      el('thead', {}, el('tr', {}, ['账号', '启用', '状态', '授权', 'Session', '并发', '时间轴（导入/更新/调度）', '额度（今日 · FB/h）', 'Freebucks', '请求', '冷却', '出口', '操作'].map((t) => el('th', {}, t)))),
       el('tbody', {}, rows.map((a, i) => buildAccountRow(a, i))),
     ]),
   ])
@@ -909,6 +909,44 @@ function applyAccountsSections(accounts) {
     if (!keep.has(node.dataset.section)) node.remove()
   }
   return true
+}
+
+function accountEntitlementCell(a) {
+  const ent = a.entitlements || {}
+  const tier = ent.accessTier || null
+  const sub = ent.subscription?.tierId || null
+  const offers = Array.isArray(ent.limitedModelOffers) ? ent.limitedModelOffers : []
+  const joinable = offers.filter((o) =>
+    Number(o?.remaining || 0) > 0 && Number(o?.userRemaining || o?.user_remaining || 0) > 0,
+  )
+  const lastProbeAt = a.lastProbe?.at || null
+  const modelCooldowns = Array.isArray(a.modelCooldowns) ? a.modelCooldowns : []
+  const tierLabel = tier === 'full' ? 'Full' : tier === 'limited' ? 'Limited' : tier === 'free' ? 'Free' : '未知'
+  const tierCls = tier === 'limited' ? 'badge warn' : tier ? 'badge ok' : 'badge'
+  const details = [
+    tier ? 'Access tier: ' + tier : 'Access tier: 尚未探测',
+    sub ? 'Subscription: ' + sub : 'Subscription: 无/未报告',
+    offers.length ? 'Limited offers: ' + offers.length + '（当前可加入 ' + joinable.length + '）' : 'Limited offers: 无/未报告',
+    ent.limitedOfferReason ? 'Offer reason: ' + ent.limitedOfferReason : null,
+    lastProbeAt ? '最近只读探测: ' + new Date(lastProbeAt).toLocaleString() : '最近只读探测: 无',
+    modelCooldowns.length
+      ? '模型级限流: ' + modelCooldowns.map((x) => x.model + ' → ' + fmtTime(x.until)).join('；')
+      : '模型级限流: 无',
+    '模型级 429 只阻止对应模型；其他模型仍可使用该账号。',
+  ].filter(Boolean).join('\n')
+  return el('div', { style: 'min-width:110px', title: details }, [
+    el('div', { class: 'row', style: 'gap:4px;flex-wrap:wrap' }, [
+      el('span', { class: tierCls }, tierLabel),
+      sub ? el('span', { class: 'badge ok' }, sub) : null,
+      offers.length ? el('span', { class: joinable.length ? 'badge ok' : 'badge warn' }, 'Offer ' + joinable.length + '/' + offers.length) : null,
+      modelCooldowns.length
+        ? el('span', { class: 'badge warn' }, '模型冷却 ' + modelCooldowns.length)
+        : null,
+    ]),
+    lastProbeAt
+      ? el('div', { class: 'muted', style: 'font-size:10px;margin-top:3px' }, '探测 ' + fmtTime(lastProbeAt))
+      : el('div', { class: 'muted', style: 'font-size:10px;margin-top:3px' }, '尚未探测'),
+  ])
 }
 
 function buildAccountRow(a, i) {
@@ -993,6 +1031,7 @@ function buildAccountRow(a, i) {
     ]),
     el('td', {}, accountEnabledControl(a)),
     el('td', {}, statusBadge),
+    el('td', {}, accountEntitlementCell(a)),
     el('td', { class: 'mono', style: 'font-size:12px' }, sess),
     el('td', { class: 'mono' }, `${a.inFlight || 0}/${a.concurrency || 1}`),
     accountTimeCell(a),
@@ -1976,11 +2015,50 @@ function accountTimeCell(a) {
 }
 
 /* ---------------- model settings ---------------- */
+function modelAdmissionCell(m) {
+  const status = m.status || (m.admissible === false ? 'unknown' : 'available')
+  const labels = {
+    available: '可准入',
+    plan_required: '需订阅',
+    offer_unavailable: 'Offer 暂停',
+    trial_used: 'Trial 已用',
+    withdrawn: '已下线',
+    region_limited: 'Tier 不匹配',
+    unknown: '待确认',
+  }
+  const cls = status === 'available'
+    ? 'badge ok'
+    : (status === 'withdrawn' || status === 'trial_used')
+      ? 'badge err'
+      : (status === 'plan_required' || status === 'offer_unavailable' || status === 'region_limited')
+        ? 'badge warn'
+        : 'badge'
+  const tiers = Array.isArray(m.access_tiers) ? m.access_tiers : (Array.isArray(m.tiers) ? m.tiers : [])
+  const offer = m.offer || null
+  const tip = [
+    '状态: ' + status,
+    tiers.length ? '允许 tier: ' + tiers.join(', ') : '允许 tier: 无/未声明',
+    m.subscription_tier ? '当前订阅: ' + m.subscription_tier : null,
+    offer ? 'Offer: global ' + (offer.remaining ?? '—') + '/' + (offer.total ?? '—') + ' · user ' + (offer.user_remaining ?? '—') + ' · joinable=' + (offer.joinable === true) : null,
+    m.limited_offer_reason ? 'Offer reason: ' + m.limited_offer_reason : null,
+    m.replacement ? '替代模型: ' + m.replacement : null,
+  ].filter(Boolean).join('\n')
+  return el('div', { style: 'min-width:105px', title: tip }, [
+    el('span', { class: cls }, labels[status] || status),
+    tiers.length ? el('div', { class: 'muted', style: 'font-size:10px;margin-top:3px' }, tiers.join(' · ')) : null,
+    m.replacement ? el('div', { class: 'muted mono', style: 'font-size:10px;margin-top:2px' }, '→ ' + shortModel(m.replacement)) : null,
+  ])
+}
+
 async function renderModelSettings(view) {
   let data = { models: [], catalog: [] }
+  let liveCatalog = { data: [] }
   let upstream = { models: [], accessTier: null }
   try {
     data = await api('/api/models/custom')
+  } catch { /* ignore */ }
+  try {
+    liveCatalog = await api('/api/models')
   } catch { /* ignore */ }
   try {
     upstream = await api('/api/models/upstream')
@@ -1989,6 +2067,17 @@ async function renderModelSettings(view) {
   const known = new Map()
   // catalog 先行：agent/兜底 agent 以 catalog 为准（内置目录是 agent 映射的权威源）
   for (const m of data.catalog || []) known.set(m.id, { ...m, source: 'catalog' })
+  // entitlement-aware 目录补充当前准入状态，但不覆盖 catalog 的 agent。
+  for (const m of liveCatalog.data || []) {
+    const prev = known.get(m.id)
+    known.set(m.id, {
+      ...(prev || {}),
+      ...m,
+      agentId: prev?.agentId || m.agentId,
+      fallbackAgentId: prev?.fallbackAgentId || m.fallbackAgentId,
+      source: prev ? prev.source : 'runtime',
+    })
+  }
   // 上游只补充额度/实时信息，不覆盖 agent（否则表格显示的 agent 与调度实际用
   // 的不一致——调度是「自定义 > catalog」，上游探测的 agentId 只是参考值）
   for (const m of upstream.models || []) {
@@ -2041,7 +2130,7 @@ async function renderModelSettings(view) {
     el('div', { class: 'row spread' }, [
       el('div', {}, [
         el('h3', { style: 'margin:0 0 2px' }, '模型管理'),
-        el('span', { class: 'muted' }, '内置目录 + 上游实时 + 自定义覆盖。上游新模型不用等发版——点「同步上游模型」自动拉取并更新 agent，或手动添加。'),
+        el('span', { class: 'muted' }, '内置目录 + 上游实时 + 自定义覆盖。准入状态来自服务端 tier/subscription/offer 快照，并由 smart probe 自动刷新；无需单独开关。'),
       ]),
       isAdmin
         ? el('div', { class: 'row' }, [
@@ -2070,9 +2159,14 @@ async function renderModelSettings(view) {
         + (onlyFreebucks && filteredOutCount ? `，已隐藏 ${filteredOutCount} 个` : '')
         + '。仅影响本表显示，不改 /v1/models 与调度）'),
     ]),
-    upstream.accessTier
+    upstream.accessTier || upstream.subscriptionTierId
       ? el('div', { class: 'muted', style: 'margin-top:6px;font-size:12px' },
-          `上游实时目录（${upstream.models.length} 个，其中 Freebucks 计费 ${freebucksCount} 个）· 当前 accessTier: ${upstream.accessTier}`)
+          '上游实时目录（' + upstream.models.length + ' 个，其中 Freebucks 计费 ' + freebucksCount + ' 个）'
+          + (upstream.accessTier ? ' · accessTier: ' + upstream.accessTier : '')
+          + (upstream.subscriptionTierId ? ' · subscription: ' + upstream.subscriptionTierId : '')
+          + (Array.isArray(upstream.limitedModelOffers) && upstream.limitedModelOffers.length
+              ? ' · offers: ' + upstream.limitedModelOffers.length
+              : ''))
       : null,
     el('div', { class: 'table-wrap', style: 'margin-top:10px;max-height:280px;overflow:auto' }, [
       el('table', { style: 'font-size:12px' }, [
@@ -2080,6 +2174,7 @@ async function renderModelSettings(view) {
           el('th', {}, '模型 id'),
           el('th', {}, '显示名'),
           el('th', {}, '池'),
+          el('th', {}, '准入'),
           el('th', {}, '额度（今日 · FB/h）'),
           el('th', {}, 'agent (base2)'),
           el('th', {}, '兜底 agent (base3)'),
@@ -2091,6 +2186,7 @@ async function renderModelSettings(view) {
           el('td', { style: 'font-family:var(--mono);font-size:11px' }, m.id),
           el('td', {}, m.display_name || m.displayName || '—'),
           el('td', {}, el('span', { class: 'badge', class: poolBadgeClass(m.pool) }, poolLabel(m.pool))),
+          el('td', {}, modelAdmissionCell(m)),
           el('td', {}, fmtModelPrice(m)),
           el('td', { style: 'font-family:var(--mono);font-size:11px' }, m.agentId || m.agent_id || '—'),
           el('td', { style: 'font-family:var(--mono);font-size:11px' }, m.fallbackAgentId || m.fallback_agent_id || '—'),
@@ -2106,7 +2202,7 @@ async function renderModelSettings(view) {
             : null,
         ]))
           : el('tr', {}, el('td', {
-              colspan: isAdmin ? '8' : '7',
+              colspan: isAdmin ? '9' : '8',
               class: 'muted',
               style: 'padding:10px 0;font-size:12px',
             }, onlyFreebucks

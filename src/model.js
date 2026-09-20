@@ -192,6 +192,102 @@ for (const m of CATALOG_MODELS) {
   }
 }
 
+
+/**
+ * Tier facts pinned from trefeon/freebuff-proxy #665 (generated from the
+ * official CodebuffAI/freebuff catalog snapshot). They are advisory metadata:
+ * model existence/listing stays independent so a stale tier observation never
+ * recreates the old "limited account only sees one model" regression.
+ */
+const MODEL_TIER_FACTS = new Map([
+  ['stealth/ox-alpha', { tiers: [], withdrawn: true, replacement: 'z-ai/glm-5.3-flash' }],
+  ['deepseek/deepseek-v4-pro', { tiers: [], withdrawn: true, replacement: 'z-ai/glm-5.3-flash' }],
+  ['minimax/minimax-m3', { tiers: [], withdrawn: true, replacement: 'z-ai/glm-5.3-flash' }],
+  ['openai/gpt-5.6-luna', { tiers: ['full', 'paid'] }],
+  ['upstage/solar-pro4', { tiers: ['limited', 'full'] }],
+  ['google/gemini-3.8-flash', { tiers: ['paid'] }],
+  ['meta/muse-spark-1.3-contributor', { tiers: [], withdrawn: true, replacement: 'z-ai/glm-5.3-flash' }],
+  ['meta/muse-spark-1.2-contributor', { tiers: ['full'] }],
+  ['z-ai/glm-5.2', { tiers: [], withdrawn: true, replacement: 'z-ai/glm-5.3-flash' }],
+  ['z-ai/glm-5.3-flash', { tiers: ['limited', 'full', 'paid'] }],
+  ['deepseek/deepseek-v4-flash', { tiers: ['limited', 'full', 'paid'] }],
+  ['mimo/mimo-v2.5', { tiers: ['limited', 'full'] }],
+  ['anthropic/claude-fable-5.1', { tiers: ['offer'] }],
+])
+
+export function modelTierFacts(id) {
+  return MODEL_TIER_FACTS.get(id) || null
+}
+
+function normalizeOffer(raw) {
+  if (!raw || typeof raw !== 'object' || typeof raw.model !== 'string') return null
+  const remaining = Number(raw.remaining)
+  const total = Number(raw.total)
+  const userRemaining = Number(raw.userRemaining ?? raw.user_remaining)
+  return {
+    model: raw.model,
+    remaining: Number.isFinite(remaining) ? remaining : 0,
+    total: Number.isFinite(total) ? total : 0,
+    user_remaining: Number.isFinite(userRemaining) ? userRemaining : 0,
+    joinable:
+      Number.isFinite(remaining) &&
+      remaining > 0 &&
+      Number.isFinite(userRemaining) &&
+      userRemaining > 0,
+  }
+}
+
+/**
+ * Advisory admission state adapted from trefeon #665. This never hides a
+ * catalog row; callers can decide whether to render/disable it.
+ */
+export function modelAdmissionState(id, opts = {}) {
+  const facts = modelTierFacts(id)
+  const tiers = facts?.tiers || []
+  if (facts?.withdrawn) {
+    return {
+      admissible: false,
+      status: 'withdrawn',
+      tiers,
+      withdrawn: true,
+      replacement: facts.replacement || null,
+      offer: null,
+    }
+  }
+
+  const offers = Array.isArray(opts.limitedOffers) ? opts.limitedOffers : []
+  const offer = offers.map(normalizeOffer).find((o) => o?.model === id) || null
+  const accessTier = opts.accessTier || null
+  const paid = Boolean(opts.subscriptionTierId)
+
+  let admissible = tiers.length === 0
+  if (tiers.includes('offer')) admissible ||= Boolean(offer?.joinable)
+  if (tiers.includes('paid')) admissible ||= paid
+  if (tiers.includes('full')) admissible ||= accessTier === 'full' || accessTier === 'free'
+  if (tiers.includes('limited')) admissible ||= accessTier === 'limited'
+
+  let status = admissible ? 'available' : 'unknown'
+  if (!admissible && tiers.includes('paid') && !paid && !tiers.includes('full') && !tiers.includes('limited')) {
+    status = 'plan_required'
+  } else if (!admissible && tiers.includes('offer')) {
+    status =
+      offer && offer.remaining > 0 && offer.user_remaining <= 0
+        ? 'trial_used'
+        : 'offer_unavailable'
+  } else if (!admissible && tiers.length > 0 && accessTier) {
+    status = 'region_limited'
+  }
+
+  return {
+    admissible,
+    status,
+    tiers,
+    withdrawn: false,
+    replacement: null,
+    offer,
+  }
+}
+
 /** Regular Freebuff picker models + documented extras Agents may request. */
 export const FREEBUFF_AVAILABLE_MODELS = /** @type {FreebuffModelInfo[]} */ (
   CATALOG_MODELS.map((m) => ({
@@ -307,7 +403,13 @@ export function buildModelsListResponse(opts = {}) {
        * tier 信息只作为元数据透出（access_tiers / current_access_tier），由调用方
        * 自己决定怎么展示。
        */
-      byId.set(m.id, toOpenAiModel(m, { available: true, accessTier }))
+      byId.set(m.id, toOpenAiModel(m, {
+        available: true,
+        accessTier,
+        subscriptionTierId: opts.subscriptionTierId ?? null,
+        limitedOffers: opts.limitedOffers || [],
+        limitedOfferReason: opts.limitedOfferReason ?? null,
+      }))
     }
   }
 
@@ -356,6 +458,7 @@ export function buildModelsListResponse(opts = {}) {
  * @param {{ available: boolean, accessTier?: string | null }} meta
  */
 function toOpenAiModel(m, meta) {
+  const admission = modelAdmissionState(m.id, meta)
   return {
     id: m.id,
     object: 'model',
@@ -365,8 +468,17 @@ function toOpenAiModel(m, meta) {
     display_name: m.displayName,
     pool: m.pool,
     multimodal: m.multimodal,
-    access_tiers: m.accessTiers,
+    access_tiers: modelTierFacts(m.id)?.tiers ?? m.accessTiers,
+    // Keep catalog visibility independent from current entitlement. Older code
+    // filtered available:false and made a limited account see only one model.
     available: meta.available,
+    admissible: admission.admissible,
+    status: admission.status,
+    withdrawn: admission.withdrawn,
+    ...(admission.replacement ? { replacement: admission.replacement } : {}),
+    ...(admission.offer ? { offer: admission.offer } : {}),
+    ...(meta.limitedOfferReason ? { limited_offer_reason: meta.limitedOfferReason } : {}),
+    ...(meta.subscriptionTierId ? { subscription_tier: meta.subscriptionTierId } : {}),
     ...(m.note ? { note: m.note } : {}),
     ...(meta.accessTier ? { current_access_tier: meta.accessTier } : {}),
   }
