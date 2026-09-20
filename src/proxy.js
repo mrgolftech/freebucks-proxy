@@ -10,6 +10,7 @@ import {
   extractAccountBanError,
   extractGateError,
   extractRateLimitError,
+  extractRateLimitWindowMs,
   isSessionRecoverableGate,
   safeText,
   UpstreamError,
@@ -1617,7 +1618,10 @@ export function createProxyHandler(ctx) {
       } catch {
         parsed = null
       }
-      const retryAfterMs = parseRetryAfterMsHeader(respHeaders['retry-after'])
+      const retryAfterMs = extractRateLimitWindowMs(
+        parsed,
+        parseRetryAfterMsHeader(respHeaders['retry-after']),
+      )
       const errCode =
         (parsed &&
         typeof parsed === 'object' &&
