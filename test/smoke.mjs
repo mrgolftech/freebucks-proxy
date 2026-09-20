@@ -85,6 +85,42 @@ configureLogger({ level: 'error' })
   )
 }
 
+// --- dashboard: 账号出口选择与检测 toast 防回归 ---
+{
+  const dashboardJs = fs.readFileSync(
+    path.join(process.cwd(), 'dashboard', 'app.js'),
+    'utf8',
+  )
+  assert.ok(
+    dashboardJs.includes('const proxies = collectAvailableProxies(pdata, state.proxies)'),
+    '账号出口绑定必须复用统一可用代理集合，不能只看 pdata.proxies',
+  )
+  assert.ok(
+    dashboardJs.includes('if (account.proxy && !proxies.includes(account.proxy))'),
+    '已绑定但不在当前出口集合中的代理必须保留为可选项',
+  )
+  assert.ok(
+    dashboardJs.includes("value: account.proxy || ''"),
+    '切到自定义代理时应预填当前绑定，便于局部修改',
+  )
+  assert.ok(
+    dashboardJs.includes('const proxy = select.value === CUSTOM ? customInput.value.trim() : select.value'),
+    '保存时必须区分下拉代理与自定义代理',
+  )
+  assert.ok(
+    dashboardJs.includes('if (select.value === CUSTOM && !proxy)'),
+    '自定义代理为空时必须拒绝提交，不能静默变成解绑',
+  )
+  assert.ok(
+    dashboardJs.includes('toast(`✅ ${a.email} 可用 · ${modelCount} 个模型`)'),
+    '单账号检测成功 toast 只应显示可用状态和模型数量',
+  )
+  assert.ok(
+    !dashboardJs.includes('次数额度 ${Object.keys(limits).length} · 钱包计费 ${walletIds.length}'),
+    '单账号检测 toast 不应重新塞回模型/额度明细',
+  )
+}
+
 // --- unit: Freebucks 价格表模型必须进入统一目录，且按计费会话调度 ---
 {
   const ids = modelIdsFromSession({
