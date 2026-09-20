@@ -8,7 +8,7 @@ import { loadConfig } from '../src/config.js'
 import { AccountRuntimes, buildAppContext } from '../src/app-context.js'
 import { SessionHandleStore } from '../src/session-handles.js'
 import { startServer } from '../src/server.js'
-import { SessionManager } from '../src/session-manager.js'
+import { SessionManager, extractSessionEntitlements } from '../src/session-manager.js'
 import { requestSlotStats } from '../src/proxy.js'
 import { configureLogger } from '../src/util/log.js'\nimport { validateStrictToolsRequest } from '../src/strict-tools.js'
 import {
@@ -24,6 +24,7 @@ import {
   configureCatalogCache,
   applyCatalogCache,
   mergeCatalogWithBuiltin,
+  modelAdmissionState,
 } from '../src/model.js'
 import {
   saveAccountUser,
@@ -144,6 +145,122 @@ configureLogger({ level: 'error' })
     false,
     'Freebucks 钱包模型每次 admit 都计费，必须走付费会话复用策略',
   )
+}
+
+
+// --- unit: tier / offer / withdrawn state (trefeon #665 parity) ---
+{
+  const ent = extractSessionEntitlements({
+    accessTier: 'limited',
+    subscription: { tierId: 'pro', status: 'active', blockedBy: 'premium_daily' },
+    limitedModelOffers: [
+      { model: 'anthropic/claude-fable-5.1', remaining: 3, total: 10, userRemaining: 1 },
+    ],
+    limitedOfferReason: 'wave_open',
+  })
+  assert.equal(ent.accessTier, 'limited')
+  assert.equal(ent.subscription.tierId, 'pro')
+  assert.equal(ent.subscription.blockedBy, 'premium_daily')
+  assert.equal(ent.limitedModelOffers[0].userRemaining, 1)
+  assert.equal(ent.limitedOfferReason, 'wave_open')
+
+  let state = modelAdmissionState('google/gemini-3.8-flash', {
+    accessTier: 'full',
+    subscriptionTierId: null,
+  })
+  assert.equal(state.admissible, false)
+  assert.equal(state.status, 'plan_required')
+
+  state = modelAdmissionState('google/gemini-3.8-flash', {
+    accessTier: 'full',
+    subscriptionTierId: 'pro',
+  })
+  assert.equal(state.admissible, true)
+  assert.equal(state.status, 'available')
+
+  state = modelAdmissionState('anthropic/claude-fable-5.1', {
+    accessTier: 'full',
+    limitedOffers: [],
+  })
+  assert.equal(state.status, 'offer_unavailable')
+
+  state = modelAdmissionState('anthropic/claude-fable-5.1', {
+    limitedOffers: [
+      { model: 'anthropic/claude-fable-5.1', remaining: 2, total: 10, userRemaining: 0 },
+    ],
+  })
+  assert.equal(state.status, 'trial_used')
+
+  state = modelAdmissionState('anthropic/claude-fable-5.1', {
+    limitedOffers: [
+      { model: 'anthropic/claude-fable-5.1', remaining: 2, total: 10, userRemaining: 1 },
+    ],
+  })
+  assert.equal(state.admissible, true)
+  assert.equal(state.offer.joinable, true)
+
+  state = modelAdmissionState('deepseek/deepseek-v4-pro')
+  assert.equal(state.status, 'withdrawn')
+  assert.equal(state.replacement, 'z-ai/glm-5.3-flash')
+}
+
+// --- unit: smart probe is read-only for the live session handle (#644 pattern) ---
+{
+  let calls = 0
+  const sm = new SessionManager({
+    upstream: {
+      freebuffSession: async (method, opts = {}) => {
+        calls += 1
+        assert.equal(method, 'GET')
+        assert.equal(opts.instanceId, undefined, 'smart probe must be session-less')
+        return {
+          status: 'none',
+          accessTier: 'full',
+          subscription: { tierId: 'pro', status: 'active' },
+          limitedModelOffers: [],
+          rateLimitsByModel: {
+            'z-ai/glm-5.3-flash': {
+              model: 'z-ai/glm-5.3-flash',
+              limit: 5,
+              recentCount: 1,
+              resetAt: new Date(Date.now() + 60_000).toISOString(),
+            },
+          },
+          freebucks: {
+            balance: 8,
+            daily: {
+              limit: 10,
+              spent: 2,
+              remaining: 8,
+              resetAt: new Date(Date.now() + 60_000).toISOString(),
+            },
+            wallet: { balance: 0, monthlyBonus: 0 },
+            prices: { 'openai/gpt-5.6-luna': 5 },
+            quotaExempt: false,
+            planId: null,
+            priceChanges: [],
+          },
+        }
+      },
+    },
+    config: {
+      session: { pollIntervalSec: 30, idleReleaseSec: 0 },
+      limits: {},
+    },
+  })
+  sm.session = {
+    status: 'active',
+    instanceId: 'keep-me',
+    model: 'z-ai/glm-5.3-flash',
+    expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+  }
+  await sm._runSmartProbe()
+  assert.equal(calls, 1)
+  assert.equal(sm.session.instanceId, 'keep-me', 'read-only probe must never overwrite live handle')
+  assert.equal(sm.entitlements.subscription.tierId, 'pro')
+  assert.equal(sm.quota.byModel['z-ai/glm-5.3-flash'].recentCount, 1)
+  assert.equal(sm.freebucks.balance, 8)
+  sm._clearSmartProbe()
 }
 
 // --- unit: CLI 登录指纹：默认主机指纹稳定；Web flow scope 隔离且流程内稳定 ---
