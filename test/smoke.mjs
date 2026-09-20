@@ -2294,8 +2294,33 @@ for (const model of verifiedSpecialModels) {
   const allOff = new AccountRuntimes(dConfig)
   assert.deepEqual(allOff.enabledKeys(), [])
   assert.deepEqual(allOff.candidateKeys('deepseek/deepseek-v4-flash'), [])
+  dConfig.server.host = '127.0.0.1'
+  dConfig.server.port = 0
+  dConfig.server.apiKeys = ['sk-disabled']
   const ctx = buildAppContext(dConfig)
   assert.equal(ctx.authToken, null, '全停用时 buildAppContext 不得因 getAny() 让服务启动失败')
+
+  // 状态接口在“有账号但全停用”时也必须保持 200，且不能挑一个停用账号去访问上游。
+  const dServer = await startServer({
+    config: dConfig,
+    runtimes: ctx.runtimes,
+    authToken: ctx.authToken,
+    authSource: ctx.authSource,
+    authEmail: ctx.authEmail,
+    upstream: ctx.upstream,
+    sessions: ctx.sessions,
+  })
+  const dStatus = await fetch(
+    `http://127.0.0.1:${dServer.address().port}/v1/freebuff/status`,
+    { headers: { authorization: 'Bearer sk-disabled' } },
+  )
+  assert.equal(dStatus.status, 200)
+  const dStatusBody = await dStatus.json()
+  assert.equal(dStatusBody.account, null)
+  assert.equal(dStatusBody.accounts.length, 2)
+  assert.ok(dStatusBody.accounts.every((x) => x.enabled === false))
+  dServer.close()
+
   let noEnabled = null
   try {
     await allOff.acquireForModel('deepseek/deepseek-v4-flash')
