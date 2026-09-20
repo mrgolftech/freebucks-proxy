@@ -783,7 +783,7 @@ function sectionOpen(section) {
 function buildAccountSection(section, rows) {
   const table = el('div', { class: 'table-wrap' }, [
     el('table', {}, [
-      el('thead', {}, el('tr', {}, ['账号', '状态', 'Session', '并发', '时间轴（导入/更新/调度）', '额度（今日 · FB/h）', 'Freebucks', '请求', '冷却', '操作'].map((t) => el('th', {}, t)))),
+      el('thead', {}, el('tr', {}, ['账号', '状态', 'Session', '并发', '时间轴（导入/更新/调度）', '额度（今日 · FB/h）', 'Freebucks', '请求', '冷却', '出口', '操作'].map((t) => el('th', {}, t)))),
       el('tbody', {}, rows.map((a, i) => buildAccountRow(a, i))),
     ]),
   ])
@@ -936,7 +936,45 @@ function buildAccountRow(a, i) {
     el('td', {}, fmtFreebucks(a.freebucks, a.session?.model, a.lastRefund)),
     el('td', { class: 'mono' }, `${a.requests || 0} 次`),
     el('td', {}, cd ? el('span', { class: 'badge warn' }, a.cooldownCode || 'cooldown') : el('span', { class: 'muted' }, '—')),
+    el('td', {}, accountProxyCell(a)),
     el('td', {}, ops),
+  ])
+}
+
+/**
+ * 账号出口一眼可见：
+ *   固定 = credentials/<key>.json 里有专属 proxy，失败也不会切到全局池；
+ *   池分配 = 当前只是全局池的首选出口，连接级失败时底层仍可能回落到池内其它代理；
+ *   直连 = 当前没有任何代理。
+ */
+function accountProxyCell(a) {
+  const bound = typeof a.proxy === 'string' && a.proxy
+  const effective = typeof a.effectiveProxy === 'string' && a.effectiveProxy
+  const mode = bound ? '固定' : effective ? '池分配' : '直连'
+  const cls = bound ? 'badge ok' : effective ? 'badge warn' : 'badge'
+  const tip = bound
+    ? `专属代理已绑定：${bound}。该账号后续登录态/会话请求都固定走它，连接失败不会自动切换其它池成员。`
+    : effective
+      ? `当前首选出口：${effective}。尚未绑定，连接失败时可能切换到全局池其它代理；可点右侧按钮把当前出口冻结为专属代理。`
+      : '当前没有代理，直接连接上游。'
+  return el('div', { style: 'min-width:110px' }, [
+    el('div', { class: 'row', style: 'gap:5px;flex-wrap:nowrap' }, [
+      el('span', { class: cls, title: tip }, mode),
+      state.me.role === 'admin'
+        ? el('button', {
+            class: 'icon muted',
+            title: bound ? '更改/取消账号专属代理' : '绑定账号专属代理',
+            onclick: () => openAccountProxyModal(a),
+          }, icon('globe', 13))
+        : null,
+    ]),
+    effective || bound
+      ? el('div', {
+          class: 'mono muted',
+          style: 'font-size:11px;max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-top:3px',
+          title: effective || bound,
+        }, shortProxy(effective || bound))
+      : '',
   ])
 }
 
@@ -2560,42 +2598,198 @@ async function openCredentialModal(account) {
   $('#cred-view').value = json
 }
 
+async function openAccountProxyModal(account) {
+  const backdrop = el('div', { class: 'modal-backdrop' })
+  const body = el('div', { class: 'card modal' }, [
+    el('h3', {}, `账号出口绑定 · ${account.email}`),
+    el('p', { class: 'muted', style: 'display:inline-flex;align-items:center;gap:6px' }, [
+      el('span', { class: 'spinner' }),
+      '正在读取代理池…',
+    ]),
+  ])
+  backdrop.append(body)
+  document.body.append(backdrop)
+  backdrop.addEventListener('click', (e) => { if (e.target === backdrop) backdrop.remove() })
+
+  let pdata = { proxies: [] }
+  try {
+    pdata = await api('/api/proxy')
+  } catch (err) {
+    body.innerHTML = ''
+    body.append(el('h3', {}, '读取代理池失败'), el('p', { class: 'muted' }, err.message))
+    return
+  }
+  const proxies = Array.isArray(pdata.proxies) ? pdata.proxies : []
+  state.proxies = proxies
+
+  // 未绑定账号若当前正由全局池分到一个出口，默认把这个出口填进去：
+  // 用户直接点“保存绑定”就能把当前 IP 冻结下来，不必复制粘贴。
+  const currentPoolProxy =
+    !account.proxy && proxies.includes(account.effectiveProxy) ? account.effectiveProxy : ''
+  const initial = account.proxy || currentPoolProxy || ''
+  const listId = `account-proxy-options-${String(account.key).replace(/[^a-zA-Z0-9_-]/g, '_')}`
+
+  body.innerHTML = ''
+  const input = el('input', {
+    id: 'account-proxy-input',
+    list: listId,
+    value: initial,
+    placeholder: '例如 http://user:pass@127.0.0.1:7890',
+    autocomplete: 'off',
+  })
+  const datalist = el('datalist', { id: listId }, proxies.map((p) => el('option', { value: p })))
+  body.append(
+    el('h3', {}, `账号出口绑定 · ${account.email}`),
+    el('p', { class: 'muted' },
+      '保存后该账号会使用专属单代理出口；连接失败直接报错，不再自动切到全局代理池其它 IP。留空则取消绑定，恢复全局池/环境代理策略。'),
+    el('label', {}, '专属代理 URL'),
+    input,
+    datalist,
+    proxies.length
+      ? el('p', { class: 'muted', style: 'font-size:12px;margin-top:6px' },
+          `代理池共有 ${proxies.length} 个出口。当前：${account.proxy ? '已固定绑定' : account.effectiveProxy ? '池分配 ' + shortProxy(account.effectiveProxy) : '直连'}。`)
+      : el('p', { class: 'muted', style: 'font-size:12px;margin-top:6px' }, '当前代理池为空，也可以手工填入一个有效代理 URL。'),
+    el('div', { class: 'row', style: 'margin-top:12px' }, [
+      el('button', { class: 'primary', onclick: async (e) => {
+        const restore = withButtonLoading(e.currentTarget, '保存中')
+        try {
+          const proxy = input.value.trim()
+          await api(`/api/accounts/${encodeURIComponent(account.key)}`, {
+            method: 'PATCH',
+            body: JSON.stringify({ proxy }),
+          })
+          toast(proxy ? `已固定账号出口：${shortProxy(proxy)}` : '已取消专属代理绑定')
+          backdrop.remove()
+          await refreshAccountsCard()
+        } catch (err) {
+          restore()
+          toast(err.message, true)
+        }
+      } }, [icon('check', 14), '保存绑定']),
+      account.proxy
+        ? el('button', { onclick: async (e) => {
+            const restore = withButtonLoading(e.currentTarget, '取消中')
+            try {
+              await api(`/api/accounts/${encodeURIComponent(account.key)}`, {
+                method: 'PATCH',
+                body: JSON.stringify({ proxy: null }),
+              })
+              toast('已取消专属代理绑定')
+              backdrop.remove()
+              await refreshAccountsCard()
+            } catch (err) {
+              restore()
+              toast(err.message, true)
+            }
+          } }, '取消绑定')
+        : null,
+      el('button', { onclick: () => backdrop.remove() }, '关闭'),
+    ]),
+  )
+}
+
 function shortProxy(proxy) {
   const m = String(proxy || '').replace(/^https?:\/\//, '').replace(/^\/\//, '')
   return m.split('@').pop() || proxy
 }
 
 /* ---------------- add account (login flow) ---------------- */
-function openAddAccount() {
+async function openAddAccount() {
   const backdrop = el('div', { class: 'modal-backdrop' })
   const body = el('div', { class: 'card modal' }, [
     el('h3', {}, '添加 Freebuff 账号（浏览器登录）'),
-    el('p', { class: 'muted', style: 'display:inline-flex;align-items:center;gap:6px' }, [el('span', { class: 'spinner' }), '服务端正在向 Freebuff 申请登录链接…']),
+    el('p', { class: 'muted', style: 'display:inline-flex;align-items:center;gap:6px' }, [
+      el('span', { class: 'spinner' }),
+      '正在读取可用代理…',
+    ]),
   ])
   backdrop.append(body)
   document.body.append(backdrop)
   backdrop.addEventListener('click', (e) => { if (e.target === backdrop) backdrop.remove() })
 
-  api('/api/accounts/login', { method: 'POST' }).then(({ flow }) => {
-    body.innerHTML = ''
-    body.append(
-      el('h3', {}, '添加 Freebuff 账号（浏览器登录）'),
-      el('p', { class: 'muted' }, '在你自己电脑的浏览器打开下面的链接并完成登录（容器内不会打开浏览器）：'),
-      el('div', { class: 'flow-url' }, flow.loginUrl),
-      el('div', { class: 'row' }, [
-        el('a', { style: 'display:inline-block', href: flow.loginUrl, target: '_blank', rel: 'noopener' }, el('button', { class: 'primary' }, [icon('globe', 14), '打开链接并登录'])),
-        el('span', { class: 'muted' }, '完成登录后本窗口会自动刷新'),
-      ]),
-      el('p', { id: 'flow-status', style: 'margin-top:12px', class: 'muted' }, '等待登录回调…'),
-      el('button', { style: 'margin-top:8px', onclick: () => { api(`/api/accounts/login/${flow.id}/cancel`, { method: 'POST' }).catch(() => {}); backdrop.remove() } }, '取消'),
-    )
-    pollFlow(flow.id, body, backdrop)
-  }).catch((err) => {
-    body.innerHTML = ''
-    body.append(el('h3', {}, '发起登录失败'), el('p', { class: 'muted' }, err.message))
-  })
-}
+  let pdata = { proxies: [], accounts: [] }
+  try {
+    pdata = await api('/api/proxy')
+  } catch {
+    // 代理列表读取失败不阻止登录；按“未绑定”继续。
+  }
+  const proxies = Array.isArray(pdata.proxies) ? pdata.proxies : []
+  state.proxies = proxies
 
+  // 默认选“当前绑定账号最少”的代理，让新增账号自然摊开，同时仍是显式绑定，
+  // 而不是只依赖全局池哈希 + 故障回落。
+  const counts = new Map(proxies.map((p) => [p, 0]))
+  for (const a of Array.isArray(pdata.accounts) ? pdata.accounts : []) {
+    if (a.proxy && counts.has(a.proxy)) counts.set(a.proxy, counts.get(a.proxy) + 1)
+  }
+  const recommended = proxies
+    .slice()
+    .sort((a, b) => (counts.get(a) - counts.get(b)) || a.localeCompare(b))[0] || ''
+
+  body.innerHTML = ''
+  const select = el('select', { id: 'new-account-proxy' }, [
+    el('option', { value: '' }, '不绑定（使用全局池；故障时可能切换出口）'),
+    ...proxies.map((p) =>
+      el('option', { value: p }, `${shortProxy(p)} · 已绑定 ${counts.get(p) || 0} 个账号`),
+    ),
+  ])
+  if (recommended) select.value = recommended
+
+  const status = el('p', { id: 'login-create-status', class: 'muted', style: 'margin-top:10px' },
+    recommended
+      ? `推荐：${shortProxy(recommended)}（当前绑定账号最少）。登录 code/status 与后续请求会固定走这个出口。`
+      : '当前没有代理池；可先在“代理设置”添加代理，或继续按现有全局/环境/直连策略登录。')
+
+  body.append(
+    el('h3', {}, '添加 Freebuff 账号（浏览器登录）'),
+    el('p', { class: 'muted' },
+      '先确定这个账号的登录出口，再生成登录链接。选中代理后，从第一次 CLI 登录请求开始就固定该出口。'),
+    el('label', {}, '账号专属代理'),
+    select,
+    status,
+    el('p', { class: 'muted', style: 'font-size:12px' },
+      '设备 ID：本次登录流程会使用独立且固定的 fingerprintId；同一流程不会变化，不再让同一容器中新账号天然共用完全相同的主机指纹。'),
+    el('div', { class: 'row', style: 'margin-top:12px' }, [
+      el('button', { class: 'primary', onclick: async (e) => {
+        const restore = withButtonLoading(e.currentTarget, '生成中')
+        try {
+          const proxy = select.value || null
+          const { flow } = await api('/api/accounts/login', {
+            method: 'POST',
+            body: JSON.stringify({ proxy }),
+          })
+          body.innerHTML = ''
+          body.append(
+            el('h3', {}, '添加 Freebuff 账号（浏览器登录）'),
+            el('p', { class: 'muted' },
+              flow.proxy
+                ? `本次登录已固定出口：${shortProxy(flow.proxy)}。请在你自己电脑的浏览器打开下面链接完成登录。`
+                : '本次登录未绑定专属代理，将使用全局池/环境代理/直连策略。请在你自己电脑的浏览器打开下面链接完成登录。'),
+            el('div', { class: 'flow-url' }, flow.loginUrl),
+            el('div', { class: 'row' }, [
+              el('a', { style: 'display:inline-block', href: flow.loginUrl, target: '_blank', rel: 'noopener' },
+                el('button', { class: 'primary' }, [icon('globe', 14), '打开链接并登录'])),
+              el('span', { class: 'muted' }, '完成登录后本窗口会自动刷新'),
+            ]),
+            el('p', { id: 'flow-status', style: 'margin-top:12px', class: 'muted' }, '等待登录回调…'),
+            el('button', {
+              style: 'margin-top:8px',
+              onclick: () => {
+                api(`/api/accounts/login/${flow.id}/cancel`, { method: 'POST' }).catch(() => {})
+                backdrop.remove()
+              },
+            }, '取消'),
+          )
+          pollFlow(flow.id, body, backdrop)
+        } catch (err) {
+          restore()
+          toast(err.message, true)
+        }
+      } }, [icon('link', 14), '生成登录链接']),
+      el('button', { onclick: () => backdrop.remove() }, '取消'),
+    ]),
+  )
+}
 async function pollFlow(id, body, backdrop) {
   try {
     const { flow } = await api(`/api/accounts/login/${id}`)
