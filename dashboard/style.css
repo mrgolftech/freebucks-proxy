@@ -1,8 +1,9 @@
 /* ============================================================
-   Freebuff Proxy 控制台 — 现代暗色主题
-   玻璃拟态 + 渐变强调 + 悬浮动画 + 骨架屏加载 + 响应式
+   Freebuff Proxy 控制台 — 双主题控制台
+   暗色 / 亮色共享同一套语义色变量，避免两套页面样式逐渐漂移。
    ============================================================ */
 :root {
+  color-scheme: dark;
   --bg: #0b0e14;
   --bg2: #11151f;
   --bg3: #171c2a;
@@ -27,6 +28,28 @@
   --font: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", "Noto Sans SC", sans-serif;
   --ease: cubic-bezier(.22, 1, .36, 1);
 }
+
+:root[data-theme="light"] {
+  color-scheme: light;
+  --bg: #f5f7fb;
+  --bg2: #ffffff;
+  --bg3: #f0f3f9;
+  --bg4: #e8edf6;
+  --border: #e1e7f0;
+  --border2: #cdd6e5;
+  --text: #182033;
+  --text2: #4e5d75;
+  --muted: #78869d;
+  --accent: #3b6ff5;
+  --accent2: #7257e8;
+  --accent3: #0891b2;
+  --green: #059669;
+  --red: #dc2626;
+  --yellow: #a96800;
+  --shadow: 0 8px 28px rgba(28, 39, 60, .08);
+  --shadow-hover: 0 14px 38px rgba(28, 39, 60, .13);
+  --glow-accent: 0 0 20px rgba(59, 111, 245, .12);
+}
 * { box-sizing: border-box; }
 html { scrollbar-color: var(--border2) transparent; }
 html, body { margin: 0; padding: 0; }
@@ -39,6 +62,13 @@ body {
   font: 14px/1.6 var(--font);
   min-height: 100vh;
   overflow-x: hidden;
+  transition: background-color .22s ease, color .22s ease;
+}
+:root[data-theme="light"] body {
+  background:
+    radial-gradient(1200px 600px at 80% -10%, rgba(59, 111, 245, .08), transparent 60%),
+    radial-gradient(1000px 500px at 10% 110%, rgba(114, 87, 232, .055), transparent 60%),
+    var(--bg);
 }
 ::selection { background: rgba(91, 140, 255, .35); }
 a { color: var(--accent); text-decoration: none; transition: color .2s; }
@@ -81,6 +111,22 @@ button.danger:hover { border-color: var(--red); background: rgba(248, 113, 113, 
 button.muted { color: var(--text2); }
 button:disabled { opacity: .45; cursor: not-allowed; transform: none !important; box-shadow: none !important; }
 button.icon { padding: 6px 8px; border-radius: 8px; }
+.theme-toggle {
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  justify-content: center;
+  border-radius: 999px !important;
+  background: var(--bg2);
+  box-shadow: 0 3px 12px rgba(0, 0, 0, .08);
+}
+.theme-toggle:hover { transform: rotate(8deg) translateY(-1px); }
+.login-theme {
+  position: fixed;
+  top: max(18px, env(safe-area-inset-top));
+  right: max(18px, env(safe-area-inset-right));
+  z-index: 5;
+}
 /* 涟漪 */
 button::after {
   content: '';
@@ -164,6 +210,14 @@ select optgroup { background: var(--bg2); color: var(--muted); font-weight: 600;
   to { opacity: 1; transform: translateY(0); }
 }
 .card:hover { border-color: var(--border2); }
+:root[data-theme="light"] .card {
+  background: linear-gradient(160deg, rgba(59, 111, 245, .035), transparent 42%), var(--bg2);
+}
+:root[data-theme="light"] button:hover { box-shadow: 0 4px 14px rgba(28, 39, 60, .10); }
+:root[data-theme="light"] .badge { background: rgba(24, 32, 51, .025); }
+:root[data-theme="light"] th { background: rgba(24, 32, 51, .018); }
+:root[data-theme="light"] .acct-section > summary:hover { background: rgba(24, 32, 51, .035); }
+:root[data-theme="light"] tbody tr:hover td { background: rgba(59, 111, 245, .035); }
 h2, h3 { margin: 0; }
 h2 { font-size: 18px; font-weight: 700; letter-spacing: .2px; }
 h3 { font-size: 15px; font-weight: 600; }
@@ -317,6 +371,7 @@ nav button.active {
   z-index: 50;
   animation: fadeIn .2s ease both;
 }
+:root[data-theme="light"] .modal-backdrop { background: rgba(36, 48, 71, .28); }
 .modal {
   width: min(600px, 94vw);
   max-height: 88vh;
@@ -394,6 +449,17 @@ nav button.active {
 .switch-input:focus-visible + .switch-track { outline: 2px solid var(--accent); outline-offset: 2px; }
 .switch-input:disabled + .switch-track { opacity: .55; cursor: not-allowed; }
 .switch-status { min-width: 44px; color: var(--text); font-size: 12px; }
+.account-enable-switch { gap: 7px; white-space: nowrap; }
+.account-enable-switch .switch-status { min-width: 24px; }
+tr.account-disabled td {
+  background-image: linear-gradient(90deg, rgba(107, 116, 136, .035), transparent);
+}
+tr.account-disabled td:first-child {
+  color: var(--muted);
+}
+:root[data-theme="light"] tr.account-disabled td {
+  background-image: linear-gradient(90deg, rgba(78, 93, 117, .045), transparent);
+}
 
 /* ---------- chat ---------- */
 .chat-log {
@@ -602,7 +668,7 @@ nav button.active {
 }
 /* 表格安全网：极窄屏下允许横向滚动，而不是把单元格压到无法阅读。
    表格用 min-width 保证各列有呼吸空间，overflow-x 已经在 .table-wrap 上。 */
-.table-wrap > table { min-width: 1080px; }
+.table-wrap > table { min-width: 1220px; }
 @media (max-width: 1080px) {
   .table-wrap > table { min-width: 0; }
 }
