@@ -27,7 +27,7 @@ Status: implemented
 - `parameters.type === 'object'`
 - `required` 覆盖全部顶层 `properties`
 - `additionalProperties === false`
-- 历史 assistant strict tool call 的 `arguments` 必须是合法 JSON
+- 兼容 Roo 已验证形态：`strict` 可在 tool 顶层，`required/additionalProperties` 可位于 function 层
 
 失败统一返回 400 `strict_violation`；loose tools 保持原行为。该层放在
 ToolMapper 之前，不修改 ToolMapper 的名字映射和 schema。
@@ -103,7 +103,7 @@ SessionManager 新增 `entitlements` 快照，保存：
 `test/smoke.mjs` 新增覆盖：
 
 - strict schema 合法/缺 type/缺 required/additionalProperties/loose tool；
-- strict 历史 tool call 非法 JSON；
+- Roo 的顶层 `strict` + function sibling `required/additionalProperties`；
 - paid tier 的 `plan_required` 与订阅放行；
 - limited offer 的 `offer_unavailable / trial_used / joinable`；
 - withdrawn + replacement；
