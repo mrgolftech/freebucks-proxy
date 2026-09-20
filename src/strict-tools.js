@@ -1,10 +1,10 @@
 /**
- * OpenAI strict-tool request validation.
+ * OpenAI Chat Completions strict-tool request validation.
  *
- * Mirrors the contract already exercised by trefeon/freebuff-proxy #636:
- * a function with strict:true must expose an object schema, require every
- * declared property, and reject additional properties. Loose tools are left
- * untouched.
+ * This is the Chat-ingress contract from trefeon/freebuff-proxy #636:
+ * a strict function tool must expose an object schema, every declared property
+ * must be required, and additionalProperties must be false. Roo-compatible
+ * sibling placement for required/additionalProperties is accepted.
  */
 
 /**
@@ -19,61 +19,55 @@ export function validateStrictToolsRequest(body) {
 
   const tools = Array.isArray(body.tools) ? body.tools : []
   for (const tool of tools) {
+    if (!tool || typeof tool !== 'object' || Array.isArray(tool)) continue
+    if (typeof tool.type === 'string' && tool.type && tool.type !== 'function') continue
+
     const fn =
-      tool && typeof tool === 'object' && !Array.isArray(tool)
+      tool.function && typeof tool.function === 'object' && !Array.isArray(tool.function)
         ? tool.function
         : null
-    if (!fn || typeof fn !== 'object' || fn.strict !== true) continue
+    if (!fn) continue
+    if (fn.strict !== true && tool.strict !== true) continue
 
     const name = typeof fn.name === 'string' && fn.name ? fn.name : '(unnamed)'
     strictToolNames.add(name)
     const schema = fn.parameters
     if (!schema || typeof schema !== 'object' || Array.isArray(schema)) {
-      return strictViolation(name, 'parameters must be a JSON Schema object')
+      return strictViolation(
+        name,
+        'parameters must be a JSON object schema with type object',
+      )
     }
     if (schema.type !== 'object') {
-      return strictViolation(name, "parameters.type must be 'object'")
+      return strictViolation(name, 'parameters.type must be "object"')
     }
 
     const properties =
       schema.properties && typeof schema.properties === 'object' && !Array.isArray(schema.properties)
         ? schema.properties
         : {}
-    const propertyNames = Object.keys(properties)
-    if (!Array.isArray(schema.required)) {
-      return strictViolation(name, 'parameters.required must list every property')
-    }
-    const required = new Set(schema.required.filter((v) => typeof v === 'string'))
-    const missing = propertyNames.filter((key) => !required.has(key))
-    if (missing.length > 0) {
-      return strictViolation(
-        name,
-        `parameters.required is missing: ${missing.join(', ')}`,
-      )
-    }
-    if (schema.additionalProperties !== false) {
-      return strictViolation(name, 'parameters.additionalProperties must be false')
-    }
-  }
-
-  // A strict tool call already present in conversation history must carry valid
-  // JSON arguments. This prevents replaying malformed strict calls upstream.
-  if (strictToolNames.size > 0 && Array.isArray(body.messages)) {
-    for (const message of body.messages) {
-      if (!message || typeof message !== 'object' || message.role !== 'assistant') continue
-      const calls = Array.isArray(message.tool_calls) ? message.tool_calls : []
-      for (const call of calls) {
-        const fn = call && typeof call === 'object' ? call.function : null
-        if (!fn || typeof fn !== 'object' || !strictToolNames.has(fn.name)) continue
-        if (typeof fn.arguments !== 'string') {
-          return strictViolation(fn.name, 'tool call arguments must be a JSON string')
-        }
-        try {
-          JSON.parse(fn.arguments)
-        } catch {
-          return strictViolation(fn.name, 'tool call arguments must contain valid JSON')
-        }
+    const required = new Set()
+    for (const source of [schema.required, fn.required]) {
+      if (!Array.isArray(source)) continue
+      for (const value of source) {
+        if (typeof value === 'string') required.add(value)
       }
+    }
+    for (const key of Object.keys(properties)) {
+      if (!required.has(key)) {
+        return strictViolation(
+          name,
+          `property '${key}' must be listed in required`,
+        )
+      }
+    }
+
+    const additionalProperties =
+      Object.prototype.hasOwnProperty.call(schema, 'additionalProperties')
+        ? schema.additionalProperties
+        : fn.additionalProperties
+    if (additionalProperties !== false) {
+      return strictViolation(name, 'additionalProperties must be false')
     }
   }
 
