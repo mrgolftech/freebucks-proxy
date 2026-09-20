@@ -1203,12 +1203,9 @@ async function probeAccount(a, btn) {
       : [...new Set([...Object.keys(limits), ...walletIds, ...(sess?.model ? [sess.model] : [])])]
     const modelCount = available.length
     if (r.ok) {
-      const models = Object.entries(limits)
-        .map(([id, info]) => `${shortModel(id)} ${fmtNum(info?.recentCount)}/${info?.limit ?? '?'}`)
-        .join(' · ')
-      // 两本账分开报：N 是并集（去重后），次数额度/钱包计费各自的数量会重叠。
-      const breakdown = `次数额度 ${Object.keys(limits).length} · 钱包计费 ${walletIds.length}`
-      toast(`✅ ${a.email} 可用 · ${modelCount} 个模型（${breakdown}）${models ? '：' + models : ''}`)
+      // 只报「可用 + 模型数量」：模型清单在账号行与「模型管理」里都能看，
+      // 塞进 toast 既会被截断、又盖住别的提示。要细看数量构成就看模型管理页。
+      toast(`✅ ${a.email} 可用 · ${modelCount} 个模型`)
       await refreshAccountsCard()
     } else {
       const code = r.code || sess?.status || sess?.error || r.error || '未知'
@@ -2811,38 +2808,73 @@ async function openAccountProxyModal(account) {
   const proxies = Array.isArray(pdata.proxies) ? pdata.proxies : []
   state.proxies = proxies
 
-  // 未绑定账号若当前正由全局池分到一个出口，默认把这个出口填进去：
+  // 未绑定账号若当前正由全局池分到一个出口，默认把这个出口选中：
   // 用户直接点“保存绑定”就能把当前 IP 冻结下来，不必复制粘贴。
   const currentPoolProxy =
     !account.proxy && proxies.includes(account.effectiveProxy) ? account.effectiveProxy : ''
   const initial = account.proxy || currentPoolProxy || ''
-  const listId = `account-proxy-options-${String(account.key).replace(/[^a-zA-Z0-9_-]/g, '_')}`
 
   body.innerHTML = ''
-  const input = el('input', {
+  // ⚠️ 这里原来是 `input + datalist`：候选项本来就是代理池里固定那几个出口，
+  // 却要求用户手动输入（datalist 只在敲字后才给建议，等于把选择做成了填空）。
+  // 改成真正的下拉：候选项来自池子，手工 URL 退化为显式选项——只有选中
+  // 「自定义…」时才出现文本框，常规路径完全不用打字。
+  const CUSTOM = '__custom__'
+  const options = [
+    el('option', { value: '' }, '不绑定（使用全局池；故障时可能切换出口）'),
+    ...proxies.map((p) =>
+      el('option', { value: p },
+        `${shortProxy(p)}${p === account.effectiveProxy ? ' · 当前生效' : ''}`),
+    ),
+  ]
+  // 已绑定但不在池里的代理（池被改过 / 之前手工填的）不能因为下拉没这一项就丢：
+  // 单独给一个选项，保证“打开弹窗→保存”不会把绑定悄悄改成别的出口。
+  if (account.proxy && !proxies.includes(account.proxy)) {
+    options.push(el('option', { value: account.proxy },
+      `${shortProxy(account.proxy)} · 当前绑定（不在池中）`))
+  }
+  options.push(el('option', { value: CUSTOM }, '自定义…（手工输入代理 URL）'))
+  const select = el('select', { id: 'account-proxy-select' }, options)
+  select.value = initial
+  // 值不在候选项里（异常数据）时回落到“不绑定”，别让下拉显示成第一项却提交另一个值。
+  if (select.value !== initial) select.value = ''
+
+  const customInput = el('input', {
     id: 'account-proxy-input',
-    list: listId,
-    value: initial,
+    value: account.proxy && !proxies.includes(account.proxy) ? account.proxy : '',
     placeholder: '例如 http://user:pass@127.0.0.1:7890',
     autocomplete: 'off',
+    style: 'display:none;margin-top:8px',
   })
-  const datalist = el('datalist', { id: listId }, proxies.map((p) => el('option', { value: p })))
+  const syncCustom = () => {
+    customInput.style.display = select.value === CUSTOM ? '' : 'none'
+  }
+  select.addEventListener('change', syncCustom)
+  syncCustom()
+
   body.append(
     el('h3', {}, `账号出口绑定 · ${account.email}`),
     el('p', { class: 'muted' },
-      '保存后该账号会使用专属单代理出口；连接失败直接报错，不再自动切到全局代理池其它 IP。留空则取消绑定，恢复全局池/环境代理策略。'),
-    el('label', {}, '专属代理 URL'),
-    input,
-    datalist,
+      '保存后该账号会使用专属单代理出口；连接失败直接报错，不再自动切到全局代理池其它 IP。选“不绑定”则取消绑定，恢复全局池/环境代理策略。'),
+    el('label', {}, '专属代理（从代理池选择）'),
+    select,
+    customInput,
     proxies.length
       ? el('p', { class: 'muted', style: 'font-size:12px;margin-top:6px' },
           `代理池共有 ${proxies.length} 个出口。当前：${account.proxy ? '已固定绑定' : account.effectiveProxy ? '池分配 ' + shortProxy(account.effectiveProxy) : '直连'}。`)
-      : el('p', { class: 'muted', style: 'font-size:12px;margin-top:6px' }, '当前代理池为空，也可以手工填入一个有效代理 URL。'),
+      : el('p', { class: 'muted', style: 'font-size:12px;margin-top:6px' }, '当前代理池为空，请选“自定义…”手工填入一个有效代理 URL。'),
     el('div', { class: 'row', style: 'margin-top:12px' }, [
       el('button', { class: 'primary', onclick: async (e) => {
         const restore = withButtonLoading(e.currentTarget, '保存中')
         try {
-          const proxy = input.value.trim()
+          // 下拉选中值即最终绑定值；只有「自定义…」才取文本框内容，
+          // 且必须非空——否则会把「没填完」当成「取消绑定」提交出去。
+          const proxy = select.value === CUSTOM ? customInput.value.trim() : select.value
+          if (select.value === CUSTOM && !proxy) {
+            restore()
+            toast('请填写代理 URL，或选择“不绑定”', true)
+            return
+          }
           await api(`/api/accounts/${encodeURIComponent(account.key)}`, {
             method: 'PATCH',
             body: JSON.stringify({ proxy }),
