@@ -292,6 +292,17 @@ export class AccountRuntimes {
         Boolean(this.accountState.account(a.key)?.bannedAt) || coolingCode === 'banned'
       const unavailable =
         banned || (cooling && UNAVAILABLE_COOLDOWN_CODES.has(coolingCode))
+      const modelCooldowns = []
+      const modelPrefix = `${a.key}\0`
+      for (const [coolKey, modelCd] of this.cooldowns) {
+        if (!coolKey.startsWith(modelPrefix) || !(modelCd?.until > now)) continue
+        modelCooldowns.push({
+          model: modelCd.model || coolKey.slice(modelPrefix.length),
+          code: modelCd.code || null,
+          until: new Date(modelCd.until).toISOString(),
+        })
+      }
+      modelCooldowns.sort((x, y) => String(x.model).localeCompare(String(y.model)))
       const rt = this.byKey.get(a.key)
       const snap = rt?.sessions?.getSnapshot?.()
       const chatLock = this.chatLocks.get(a.key)
@@ -310,6 +321,7 @@ export class AccountRuntimes {
         status: !enabled ? 'disabled' : banned ? 'banned' : unavailable ? 'unavailable' : 'ok',
         cooldownUntil: cooling ? new Date(cd.until).toISOString() : null,
         cooldownCode: cooling ? cd.code : null,
+        modelCooldowns,
         requests: this.stats.byKey.get(a.key) || 0,
         // 账号生命周期（持久化账本）：加入时间 / 封禁时间。重启后仍在，
         // 控制台据此区分"从未使用过 / 正在调度 / 额度不足 / 已被封禁"。
@@ -701,10 +713,11 @@ export class AccountRuntimes {
    */
   markCooldown(key, err, model = null) {
     const code = err?.code
-    let ms =
+    const explicitWindowMs =
       typeof err?.retryAfterMs === 'number' && err.retryAfterMs > 0
         ? err.retryAfterMs
-        : DEFAULT_COOLDOWN_MS
+        : null
+    let ms = explicitWindowMs ?? DEFAULT_COOLDOWN_MS
 
     if (code === 'banned') {
       ms = Math.max(ms, BANNED_COOLDOWN_MS)
@@ -716,9 +729,26 @@ export class AccountRuntimes {
       }
     }
 
-    // model_unavailable / similar: only block that model on this account
-    const perModel =
-      code === 'model_unavailable' && model && !ACCOUNT_COOLDOWN_CODES.has(code)
+    // trefeon #624 parity:
+    // - model_unavailable is inherently model-scoped;
+    // - rate_limited is remembered per account+model ONLY when upstream gave
+    //   an explicit expiry (Retry-After/resetAt). An opaque 429 is not sticky:
+    //   a later request must be allowed to test the lane live again.
+    const modelUnavailable =
+      code === 'model_unavailable' && Boolean(model)
+    const modelRateLimit =
+      code === 'rate_limited' && Boolean(model) && explicitWindowMs != null
+    if (code === 'rate_limited' && model && explicitWindowMs == null) {
+      logger.info('opaque model rate limit not persisted', {
+        key,
+        code,
+        model,
+        scope: 'request',
+      })
+      return { remembered: false, scope: 'none', until: null }
+    }
+
+    const perModel = modelUnavailable || modelRateLimit
     const k = perModel ? this._cooldownKey(key, model) : key
     const until = Date.now() + Math.min(ms, DAY_MS)
     this.cooldowns.set(k, {
@@ -734,6 +764,11 @@ export class AccountRuntimes {
       model: perModel ? model : null,
       scope: perModel ? 'model' : 'account',
     })
+    return {
+      remembered: true,
+      scope: perModel ? 'model' : 'account',
+      until,
+    }
   }
 
   clearCooldown(key, model = null) {
@@ -1205,15 +1240,24 @@ export class AccountRuntimes {
         (opts.gateCode && SWITCHABLE_CODES.has(opts.gateCode))
       ) {
         if (!opts.noCooldown) {
-          this.markCooldown(
+          const remembered = this.markCooldown(
             opts.preferredKey,
             new UpstreamError(opts.gateCode, {
               code: opts.gateCode,
               status: 429,
-              retryAfterMs: opts.retryAfterMs ?? 30_000,
+              // Preserve "opaque" as opaque. #624 explicitly does not invent
+              // an expiry for a 429 that did not carry one upstream.
+              retryAfterMs: opts.retryAfterMs ?? undefined,
             }),
             model,
           )
+          if (
+            opts.gateCode === 'rate_limited' &&
+            remembered?.remembered === false &&
+            opts.skipKeys instanceof Set
+          ) {
+            opts.skipKeys.add(opts.preferredKey)
+          }
         } else if (opts.switchAccount) {
           // noCooldown 且 switchAccount（free_mode_capacity_deferred /
           // account_busy / runtime_superseded）：**不是真故障**。
