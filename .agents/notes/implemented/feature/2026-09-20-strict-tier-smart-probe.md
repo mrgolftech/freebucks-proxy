@@ -78,6 +78,15 @@ SessionManager 新增 `entitlements` 快照，保存：
 现有 live-session poll 保留，smart probe 是对 parked/session-less 状态的补充，
 不是新的 admission 路径。
 
+### 4. 控制台同步展示
+
+后端状态不能只停留在 API。控制台同步增加：
+
+- 账号表“授权”列：显示 access tier、subscription tier、limited offer 数量和最近只读探测时间；
+- 模型管理“准入”列：显示可准入、需订阅、Offer 暂停、Trial 已用、Tier 不匹配、已下线及 replacement；
+- 模型管理同时读取 `/api/models` 的 entitlement-aware 目录与 `/api/models/upstream` 的实时价格/额度，不在前端重新推导准入规则；
+- smart probe 不提供关闭开关，只展示它刷新后的授权/额度结果，避免用户关闭后重新使用陈旧 quota。
+
 ## Alternatives considered
 
 - **把 strict 校验塞进 ToolMapper** — 拒绝。名字虚拟化与 schema 契约是两个独立
