@@ -18,7 +18,7 @@ import {
 } from '../auth-store.js'
 import { logger } from '../util/log.js'
 import { requestSlotStats } from '../proxy.js'
-import { dataFileAudit } from '../util/json-store.js'
+import { dataFileAudit, sanitizeProxyList } from '../util/json-store.js'
 
 const SESSION_COOKIE = 'fb_session'
 
@@ -648,15 +648,25 @@ export function createWebApi(deps) {
         sendJson(res, 404, { error: '账号不存在' })
         return true
       }
-      const proxy =
-        typeof body.proxy === 'string' && body.proxy.trim()
-          ? body.proxy.trim()
-          : null
+      let proxy
+      try {
+        proxy = normalizeBoundProxy(body.proxy)
+      } catch (err) {
+        sendJson(res, 400, {
+          error: err instanceof Error ? err.message : String(err),
+        })
+        return true
+      }
       raw.proxy = proxy
       writeJsonFile(row.path, raw)
-      // 让新的出口代理立即生效：丢弃缓存的 runtime
+      // 让新的出口代理立即生效：丢弃缓存的 runtime。显式 proxy 会进入
+      // createUpstreamClient 的 single 分支，因此连接失败也不会偷偷切到池里别的出口。
       await runtimes.invalidate(row.key)
-      logger.info('account proxy updated via web', { key: row.key, email: row.email, proxy })
+      logger.info('account proxy updated via web', {
+        key: row.key,
+        email: row.email,
+        proxy: proxyForLog(proxy),
+      })
       sendJson(res, 200, { ok: true, key: row.key, email: row.email, proxy })
       return true
     }
@@ -1310,9 +1320,28 @@ export function createWebApi(deps) {
       return true
     }
     if (method === 'POST' && route === '/api/accounts/login') {
+      let body = {}
       try {
-        const flow = await loginFlows.start()
-        logger.info('web login flow started', { id: flow.id })
+        body = await readJson(req)
+      } catch {
+        sendJson(res, 400, { error: '无效的 JSON' })
+        return true
+      }
+      let proxy
+      try {
+        proxy = normalizeBoundProxy(body.proxy)
+      } catch (err) {
+        sendJson(res, 400, {
+          error: err instanceof Error ? err.message : String(err),
+        })
+        return true
+      }
+      try {
+        const flow = await loginFlows.start({ proxy })
+        logger.info('web login flow started', {
+          id: flow.id,
+          proxy: proxyForLog(proxy),
+        })
         sendJson(res, 200, { ok: true, flow })
       } catch (err) {
         sendJson(res, 502, {
@@ -1440,6 +1469,36 @@ function envProxyOrNull() {
     process.env.http_proxy ||
     null
   )
+}
+
+/**
+ * 账号绑定代理必须“要么有效、要么拒绝”，不能像运行时容错那样把畸形值
+ * 静默当成 null。否则用户以为账号固定了出口，实际上会落回全局池并可能换 IP。
+ * 空值表示“取消专属绑定，恢复全局池/环境代理策略”。
+ */
+function normalizeBoundProxy(value) {
+  if (value == null || value === '') return null
+  if (typeof value !== 'string') {
+    throw new Error('代理地址必须是字符串 URL')
+  }
+  const trimmed = value.trim()
+  if (!trimmed) return null
+  const { urls } = sanitizeProxyList([trimmed])
+  if (urls.length !== 1) {
+    throw new Error('代理地址无效，仅支持 http://、https://、socks://、socks5:// URL')
+  }
+  return urls[0]
+}
+
+/** 日志不打印代理口令，只保留 scheme + host。 */
+function proxyForLog(value) {
+  if (!value) return null
+  try {
+    const u = new URL(value)
+    return `${u.protocol}//${u.host}`
+  } catch {
+    return '(invalid proxy)'
+  }
 }
 
 /**
