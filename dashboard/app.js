@@ -1293,18 +1293,20 @@ async function renderFlowsCard(view) {
 
 /* ---------------- proxy settings ---------------- */
 async function renderProxySettings(view) {
-  let data = null
-  let settings = null
+  let data = { proxies: state.proxies, effective: [], accounts: [] }
+  let settings = { freeToolSignatureEnabled: true }
+  // 两个控制面接口必须独立失败：settings 临时异常不能把已经读到的代理池清空。
   try {
-    ;[data, settings] = await Promise.all([
-      api('/api/proxy'),
-      api('/api/settings'),
-    ])
+    data = await api('/api/proxy')
   } catch {
-    data = { proxies: [], effective: [], accounts: [] }
-    settings = { freeToolSignatureEnabled: true }
+    // 保留上一轮成功读取的 state.proxies，避免 UI 瞬时显示“代理池为空”。
   }
-  state.proxies = data.proxies || []
+  try {
+    settings = await api('/api/settings')
+  } catch {
+    // 设置读取失败只回退设置默认值，不影响代理数据。
+  }
+  if (Array.isArray(data.proxies)) state.proxies = data.proxies
   // 「空闲释放推荐值」要按账号池实时算（活跃模型/账号比），而 /api/proxy 只回
   // 代理信息、不含 session.model。这里单独拉一次 overview 填充 state.accounts。
   // 独立 try：overview 挂了也不能把上面的 settings 一起拖垮（否则整页回落到默认值）。
@@ -1812,6 +1814,7 @@ async function saveProxyPool() {
   const proxies = textarea.value.split('\n').map((x) => x.trim()).filter(Boolean)
   try {
     const r = await api('/api/proxy', { method: 'POST', body: JSON.stringify({ proxies }) })
+    if (Array.isArray(r.proxies)) state.proxies = r.proxies
     toast(r.note || '已保存')
     // 局部刷新「当前生效代理」文字，不重建页面
     try {
