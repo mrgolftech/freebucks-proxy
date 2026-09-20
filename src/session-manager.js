@@ -452,8 +452,9 @@ export class SessionManager {
         resetAt: fb.daily?.resetAt || null,
       }
     }
-    const monthlySpent =
-      fb.monthly != null && Number(fb.monthly.remainingUsd) <= 0
+    // Official current wire marks monthly provider-spend allowance deprecated;
+    // admission authority is the current Freebucks quote/balance. Keep monthly
+    // for display/back-compat only, never make it a local hard gate.
     // 条件①：今日池跑完（`limit > 0` 才算真的有池子，避免把 limit=0 的
     // "没有池子" 误判成"池子跑完"）。resetAt 已过在上面就 return 了，所以这里
     // 的 remaining 一定是未重置周期的数字。quotaExempt 账号不受任何池限制。
@@ -465,22 +466,24 @@ export class SessionManager {
       Number.isFinite(dailyRemaining) &&
       dailyRemaining <= 0
     // 条件②：余额买不起本次请求
-    const shortOnBalance = Number(fb.balance) < price
+    const claimable = Number(fb.claimableGrantFreebucks) || 0
+    const spendable = Number(fb.balance) + Math.max(0, claimable)
+    const shortOnBalance = spendable < price
     const exempt = fb.quotaExempt === true
     const affordable =
-      exempt || (!dailyExhausted && !shortOnBalance && !monthlySpent)
+      exempt || (!dailyExhausted && !shortOnBalance)
     /** 命中哪一条（用于日志/前端解释；affordable=true 时为 null）。 */
     const reason = affordable
       ? null
       : dailyExhausted
         ? "daily_exhausted"
-        : monthlySpent
-          ? "monthly_exhausted"
-          : "balance_shortfall"
+        : "balance_shortfall"
     return {
       known: true,
       price,
       balance: fb.balance,
+      claimableGrantFreebucks: Math.max(0, claimable),
+      spendable,
       affordable,
       unmetered: false,
       quotaExempt: exempt,
@@ -896,6 +899,7 @@ export class SessionManager {
         this._apply(body)
         this._lastSmartProbeAt = Date.now()
         this._smartProbeBackoffMs = 0
+        this._clearSmartProbe()
         this._setLastProbe({ ok: true })
         this._scheduleResetProbe()
         if (this.hasLiveSlot()) this._armPoll()
