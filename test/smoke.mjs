@@ -10,7 +10,7 @@ import { SessionHandleStore } from '../src/session-handles.js'
 import { startServer } from '../src/server.js'
 import { SessionManager } from '../src/session-manager.js'
 import { requestSlotStats } from '../src/proxy.js'
-import { configureLogger } from '../src/util/log.js'
+import { configureLogger } from '../src/util/log.js'\nimport { validateStrictToolsRequest } from '../src/strict-tools.js'
 import {
   requireModelId,
   isFreeModel,
