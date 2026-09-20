@@ -6079,6 +6079,37 @@ server.close()
   assert.equal(poor.affordable, false, '余额 < 单价 必须拦——上游封号条件②')
   assert.equal(poor.reason, 'balance_shortfall', '必须标明是余额不足')
 
+  // 官方当前 wire: claimableGrantFreebucks 可参与 admission 支付。
+  sm.freebucks = {
+    balance: 10,
+    claimableGrantFreebucks: 20,
+    daily: { limit: 85, spent: 20, remaining: 65, resetAt: null },
+    wallet: { balance: 0 },
+    prices: { [model]: price },
+    quotaExempt: false,
+    monthly: null,
+  }
+  const grant = sm.freebucksFor(model)
+  assert.equal(grant.affordable, true, 'balance + claimable grant 足够时必须放行')
+  assert.equal(grant.spendable, 30)
+  assert.equal(grant.claimableGrantFreebucks, 20)
+
+  // 官方已将 legacy monthly provider-spend cap 标为 deprecated：保留展示，
+  // 但不能因为旧快照 remainingUsd=0 就本地拒绝一次当前报价允许的 admission。
+  sm.freebucks = {
+    balance: 100,
+    daily: { limit: 85, spent: 20, remaining: 65, resetAt: null },
+    wallet: { balance: 0 },
+    prices: { [model]: price },
+    quotaExempt: false,
+    monthly: { remainingUsd: 0, resetAt: null },
+  }
+  assert.equal(
+    sm.freebucksFor(model).affordable,
+    true,
+    'deprecated monthly 快照不得继续充当 admission 硬闸门',
+  )
+
   // 两条都不命中 → 放行（不能误伤正常账号）
   sm.freebucks = {
     balance: 100,
