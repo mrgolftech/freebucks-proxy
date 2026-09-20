@@ -115,6 +115,8 @@ export class SessionManager {
      * }}
      */
     this.freebucks = null
+    /** Server-authored tier / subscription / limited-offer snapshot. */
+    this.entitlements = null
     /** 最近一次早退 DELETE 的回执（控制台展示/排查用）。 */
     this.lastRefund = null
     /**
@@ -538,6 +540,7 @@ export class SessionManager {
         status: 'none',
         quota: this.quota,
         freebucks: this.freebucks,
+        entitlements: this.entitlements,
         lastRefund: this.lastRefund,
         lastProbe: this.lastProbe,
         ...counts,
@@ -553,6 +556,7 @@ export class SessionManager {
       live: this.hasLiveSlot(s),
       quota: this.quota,
       freebucks: this.freebucks,
+      entitlements: this.entitlements,
       lastRefund: this.lastRefund,
       lastProbe: this.lastProbe,
       ...counts,
@@ -824,7 +828,9 @@ export class SessionManager {
     if (quota) this.quota = quota
     const freebucks = extractFreebucks(body)
     if (freebucks) this.freebucks = freebucks
-    if (quota || freebucks) this._notifyStateChange()
+    const entitlements = extractSessionEntitlements(body)
+    if (entitlements) this.entitlements = entitlements
+    if (quota || freebucks || entitlements) this._notifyStateChange()
     // admit 可能发生在没有任何在途请求时（选号阶段就 admit、随后才拿 chat
     // 锁）：这里兜底起空闲计时，否则会话会一直挂到过期。
     if (this._inFlight === 0) this._armIdleRelease()
@@ -1305,6 +1311,7 @@ export class SessionManager {
       this._onStateChange({
         freebucks: this.freebucks,
         quota: this.quota,
+        entitlements: this.entitlements,
         lastProbe: this.lastProbe,
       })
     } catch (err) {
@@ -1448,6 +1455,55 @@ function extractQuota(body) {
 }
 
 /**
+ * Preserve server-owned entitlement state instead of re-deriving it locally.
+ * Mirrors the fields consumed by trefeon #665.
+ */
+export function extractSessionEntitlements(body) {
+  if (!body || typeof body !== 'object') return null
+  const offers = Array.isArray(body.limitedModelOffers)
+    ? body.limitedModelOffers
+        .filter((o) => o && typeof o === 'object' && typeof o.model === 'string')
+        .map((o) => ({
+          model: o.model,
+          remaining: num(o.remaining),
+          total: num(o.total),
+          userRemaining: num(o.userRemaining ?? o.user_remaining),
+        }))
+    : []
+  const subscription =
+    body.subscription && typeof body.subscription === 'object'
+      ? {
+          tierId:
+            typeof body.subscription.tierId === 'string'
+              ? body.subscription.tierId
+              : null,
+          status:
+            typeof body.subscription.status === 'string'
+              ? body.subscription.status
+              : null,
+          blockedBy:
+            typeof body.subscription.blockedBy === 'string'
+              ? body.subscription.blockedBy
+              : null,
+        }
+      : null
+  const accessTier =
+    typeof body.accessTier === 'string' ? body.accessTier : null
+  const limitedOfferReason =
+    typeof body.limitedOfferReason === 'string' ? body.limitedOfferReason : null
+  if (!accessTier && !subscription && offers.length === 0 && !limitedOfferReason) {
+    return null
+  }
+  return {
+    accessTier,
+    subscription,
+    limitedModelOffers: offers,
+    limitedOfferReason,
+    updatedAt: new Date().toISOString(),
+  }
+}
+
+/**
  * Pull the Freebucks meter out of a Freebuff session payload (2026-09 计费改版).
  *
  * 上游把「计费货币」放在每个 session 响应的 freebucks 字段里：
@@ -1496,8 +1552,22 @@ function extractFreebucks(body) {
     },
     prices,
     quotaExempt: fb.quotaExempt === true,
+    claimableGrantFreebucks: num(fb.claimableGrantFreebucks),
     planId: typeof fb.planId === 'string' ? fb.planId : null,
     monthly,
+    listPrices:
+      fb.listPrices && typeof fb.listPrices === 'object' ? { ...fb.listPrices } : null,
+    firstTabDiscount:
+      fb.firstTabDiscount && typeof fb.firstTabDiscount === 'object'
+        ? { ...fb.firstTabDiscount }
+        : null,
+    priceNotices:
+      fb.priceNotices && typeof fb.priceNotices === 'object'
+        ? { ...fb.priceNotices }
+        : null,
+    offPeak:
+      fb.offPeak && typeof fb.offPeak === 'object' ? { ...fb.offPeak } : null,
+    priceChanges: Array.isArray(fb.priceChanges) ? fb.priceChanges.map((x) => ({ ...x })) : [],
     peak: fb.peak && typeof fb.peak === 'object' ? fb.peak : null,
     updatedAt: new Date().toISOString(),
   }
