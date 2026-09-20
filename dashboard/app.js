@@ -2785,7 +2785,7 @@ async function openAddAccount() {
           restore()
           toast(err.message, true)
         }
-      } }, [icon('link', 14), '生成登录链接']),
+      } }, [icon('globe', 14), '生成登录链接']),
       el('button', { onclick: () => backdrop.remove() }, '取消'),
     ]),
   )
