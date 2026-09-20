@@ -162,3 +162,84 @@ jobs:
             ${{ env.DOCKERHUB_USERNAME }}/freebuff-proxy:${{ steps.meta.outputs.version || 'latest' }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  # 正式版本自动发布：package.json 版本在 main 上变更且对应 Release 尚不存在时，
+  # 在所有测试/镜像启动门禁通过后：
+  #   1) 构建不可变的 semver 镜像标签（X.Y.Z / X.Y）；
+  #   2) 创建 GitHub Release + vX.Y.Z tag。
+  #
+  # 为什么不把 X.Y.Z 直接塞进普通 main build-push：后续 main 提交如果版本号没 bump，
+  # 会把同一个正式版本镜像标签覆盖掉，破坏“版本号 = 固定构建”的可追溯性。
+  release-version:
+    needs: [test, image-boot, build-push]
+    if: github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve version and release state
+        id: release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="$(node -p "require('./package.json').version")"
+          TAG="v${VERSION}"
+          MAJOR_MINOR="${VERSION%.*}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "major_minor=${MAJOR_MINOR}" >> "$GITHUB_OUTPUT"
+          if gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            echo "needed=false" >> "$GITHUB_OUTPUT"
+            echo "Release ${TAG} already exists; skip immutable version publish."
+          else
+            echo "needed=true" >> "$GITHUB_OUTPUT"
+            echo "Release ${TAG} does not exist; publishing it now."
+          fi
+
+      - name: Set up Docker Buildx
+        if: steps.release.outputs.needed == 'true'
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        if: steps.release.outputs.needed == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Inject release version into frontend
+        if: steps.release.outputs.needed == 'true'
+        run: |
+          VERSION="${{ steps.release.outputs.version }}"
+          SHA="${{ github.sha }}"
+          node scripts/inject-version.mjs --version "${VERSION}" --repo "https://github.com/${{ github.repository }}"
+          node -e "const fs=require('fs');const p='dashboard/version.json';const j=JSON.parse(fs.readFileSync(p));j.commit='${SHA}';fs.writeFileSync(p,JSON.stringify(j,null,2)+'\n')"
+          cat dashboard/version.json
+
+      - name: Build and push immutable release image
+        if: steps.release.outputs.needed == 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.IMAGE_NAME }}:${{ steps.release.outputs.version }}
+            ${{ env.IMAGE_NAME }}:${{ steps.release.outputs.major_minor }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Create GitHub Release
+        if: steps.release.outputs.needed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ steps.release.outputs.tag }}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --target "${GITHUB_SHA}" \
+            --title "${{ steps.release.outputs.tag }}" \
+            --generate-notes
