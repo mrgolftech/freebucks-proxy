@@ -1949,8 +1949,19 @@ for (const model of verifiedSpecialModels) {
   assert.ok(sessionPosts >= 2)
   const accounts = multiRuntimes.list()
   const a = accounts.find((x) => x.email === 'a@example.com')
-  assert.equal(a.available, false)
-  assert.equal(a.cooldownCode, 'rate_limited')
+  // #624 semantics: this 429 carried a retry window for the requested model,
+  // so A stays globally healthy and only A+deepseek is parked.
+  assert.equal(a.available, true)
+  assert.equal(a.cooldownCode, null)
+  assert.equal(a.modelCooldowns.length, 1)
+  assert.equal(a.modelCooldowns[0].model, 'deepseek/deepseek-v4-flash')
+  assert.equal(a.modelCooldowns[0].code, 'rate_limited')
+  assert.ok(
+    multiRuntimes
+      .candidateKeys('mimo/mimo-v2.5')
+      .includes(a.key),
+    'A must remain eligible for a different model',
+  )
   // quota from admit is surfaced on the row
   const b = accounts.find((x) => x.email === 'b@example.com')
   assert.equal(b.quota.byModel['deepseek/deepseek-v4-flash'].limit, 6)
