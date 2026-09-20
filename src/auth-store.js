@@ -28,6 +28,7 @@ import { logger } from './util/log.js'
  * @property {string} authToken
  * @property {string} [fingerprintId]
  * @property {string} [fingerprintHash]
+ * @property {boolean} [enabled] 是否参与自动调度；缺省 true
  */
 
 export function resolveCredentialsDir(config) {
@@ -136,6 +137,8 @@ export function coerceUser(raw) {
     authToken: raw.authToken,
     fingerprintId: raw.fingerprintId,
     fingerprintHash: raw.fingerprintHash,
+    // 缺省启用，保证老凭据无感升级；只有显式 false 才退出自动调度。
+    enabled: raw.enabled !== false,
     /** 可选：该账号专属出网代理，如 http://user:pass@127.0.0.1:7890 */
     proxy: typeof raw.proxy === 'string' && raw.proxy.trim()
       ? raw.proxy.trim()
@@ -231,7 +234,7 @@ export function saveAccountUser(dir, user) {
 /**
  * 列出所有账号，并自动把旧 <email>.json（内容含 id）迁移为 <id>.json。
  * 同一 key 出现多个文件时只保留 <key>.json（旧命名重复文件删除）。
- * @returns {Array<{ key: string, id: string | null, email: string, name?: string, path: string, proxy: string | null }>}
+ * @returns {Array<{ key: string, id: string | null, email: string, name?: string, path: string, proxy: string | null, enabled: boolean }>}
  */
 /**
  * 上一次 listAccounts() 跳过的脏凭据文件（绝对路径）。
@@ -245,7 +248,7 @@ export function listAccounts(dir) {
   if (!fs.existsSync(dir)) return []
   invalidCredentialFiles.length = 0
   const files = fs.readdirSync(dir).filter((f) => f.endsWith('.json'))
-  /** @type {Map<string, { email: string, name?: string, id: string | null, path: string, proxy: string | null }>} */
+  /** @type {Map<string, { email: string, name?: string, id: string | null, path: string, proxy: string | null, enabled: boolean }>} */
   const byKey = new Map()
   for (const file of files) {
     const full = path.join(dir, file)
@@ -296,6 +299,7 @@ export function listAccounts(dir) {
       name: user.name,
       path: fs.existsSync(target) ? target : full,
       proxy: user.proxy || null,
+      enabled: user.enabled !== false,
     })
   }
   const accounts = [...byKey.values()]
