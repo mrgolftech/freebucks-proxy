@@ -16,6 +16,10 @@ const ACCOUNT_LEVEL_SESSION_STATUSES = new Set([
 const REFUND_RETRY_INTERVAL_MS = 30_000
 /** 待结算退款的追问窗口上限（毫秒）。超窗后句柄仍留在 sessions.json，交给下次启动扫尾。 */
 const REFUND_RETRY_MAX_MS = 60 * 60 * 1000
+/** Smart zero-cost probe pacing, adapted from trefeon #644. */
+const SMART_PROBE_MIN_INTERVAL_MS = 60_000
+const SMART_PROBE_BACKOFF_MAX_MS = 30 * 60_000
+const SMART_PROBE_RESET_SLOP_MS = 1_000
 
 /**
  * Manages a single Freebuff free-session slot for this proxy process.
@@ -89,6 +93,11 @@ export class SessionManager {
     this.quota = null
     this._mutex = Promise.resolve()
     this._pollTimer = null
+    /** Session-less, event/reset-driven quota probe (#644 pattern). */
+    this._smartProbeTimer = null
+    this._smartProbeDueAt = 0
+    this._smartProbeBackoffMs = 0
+    this._lastSmartProbeAt = 0
     /** 当前正在处理中的请求数（在途 chat 时跳过轮询 GET，避免干扰活跃会话）。 */
     this._inFlight = 0
     /**
@@ -198,6 +207,9 @@ export class SessionManager {
       this._idleWaiters = []
       for (const wake of waiters) wake()
       this._armIdleRelease()
+      // Activity-triggered, zero-cost probe: deduplicated/min-paced below, so
+      // bursts produce at most one GET instead of one probe per request.
+      this._scheduleSmartProbe('chat_complete')
     }
   }
 
@@ -831,6 +843,7 @@ export class SessionManager {
     const entitlements = extractSessionEntitlements(body)
     if (entitlements) this.entitlements = entitlements
     if (quota || freebucks || entitlements) this._notifyStateChange()
+    this._scheduleResetProbe()
     // admit 可能发生在没有任何在途请求时（选号阶段就 admit、随后才拿 chat
     // 锁）：这里兜底起空闲计时，否则会话会一直挂到过期。
     if (this._inFlight === 0) this._armIdleRelease()
@@ -870,6 +883,10 @@ export class SessionManager {
           }
           this._setLastProbe(probe)
           this._clearPoll()
+          if (accountLevel === 'rate_limited' || accountLevel === 'free_mode_rate_limited') {
+            this._increaseSmartProbeBackoff()
+            this._scheduleSmartProbe('rate_limited', this._smartProbeBackoffMs)
+          }
           throw new UpstreamError(
             `freebuff session probe: ${accountLevel}` +
               (body?.message ? ` — ${body.message}` : ''),
@@ -877,7 +894,10 @@ export class SessionManager {
           )
         }
         this._apply(body)
+        this._lastSmartProbeAt = Date.now()
+        this._smartProbeBackoffMs = 0
         this._setLastProbe({ ok: true })
+        this._scheduleResetProbe()
         if (this.hasLiveSlot()) this._armPoll()
         else this._clearPoll()
         return this.session
@@ -936,6 +956,7 @@ export class SessionManager {
    */
   async _releaseUnlocked({ retry = true } = {}) {
     this._clearPoll()
+    this._clearSmartProbe()
     this._clearIdleRelease()
     if (!this.hasLiveSlot()) {
       this.session = { status: 'none' }
@@ -1335,6 +1356,131 @@ export class SessionManager {
       await this._releaseUnlocked()
       return this._admitUnlocked(model)
     })
+  }
+
+  /**
+   * Schedule one session-less GET probe. Existing earlier timers win, so a
+   * burst of successful chats collapses to one probe. Backoff and a 60s floor
+   * mirror the conservative #644 behaviour without adding another config knob.
+   */
+  _scheduleSmartProbe(reason, delayMs = 0) {
+    const now = Date.now()
+    const minDue = this._lastSmartProbeAt > 0
+      ? this._lastSmartProbeAt + SMART_PROBE_MIN_INTERVAL_MS
+      : now
+    const due = Math.max(
+      now + Math.max(0, Number(delayMs) || 0),
+      minDue,
+      this._smartProbeBackoffMs > 0 ? now + this._smartProbeBackoffMs : now,
+    )
+    if (this._smartProbeTimer && this._smartProbeDueAt <= due) return
+    this._clearSmartProbe()
+    this._smartProbeDueAt = due
+    this._smartProbeTimer = setTimeout(() => {
+      this._smartProbeTimer = null
+      this._smartProbeDueAt = 0
+      this._runSmartProbe().catch((err) => {
+        logger.warn('smart session probe failed', {
+          reason,
+          error: err instanceof Error ? err.message : String(err),
+        })
+      })
+    }, Math.max(0, due - now))
+    if (this._smartProbeTimer.unref) this._smartProbeTimer.unref()
+  }
+
+  _scheduleResetProbe() {
+    const resets = []
+    if (this.freebucks?.daily?.resetAt) resets.push(this.freebucks.daily.resetAt)
+    for (const row of Object.values(this.quota?.byModel || {})) {
+      if (row?.resetAt) resets.push(row.resetAt)
+    }
+    const now = Date.now()
+    let earliest = Infinity
+    for (const raw of resets) {
+      const t = Date.parse(raw)
+      if (Number.isFinite(t) && t > now && t < earliest) earliest = t
+    }
+    if (Number.isFinite(earliest)) {
+      this._scheduleSmartProbe(
+        'quota_reset',
+        Math.max(0, earliest - now + SMART_PROBE_RESET_SLOP_MS),
+      )
+    }
+  }
+
+  _increaseSmartProbeBackoff() {
+    this._smartProbeBackoffMs = Math.min(
+      SMART_PROBE_BACKOFF_MAX_MS,
+      this._smartProbeBackoffMs > 0 ? this._smartProbeBackoffMs * 2 : 60_000,
+    )
+  }
+
+  async _runSmartProbe() {
+    // Never race a live turn. If a chat is active, defer briefly and let the
+    // event trigger at endRequest collapse into the same timer.
+    if (this._inFlight > 0) {
+      this._scheduleSmartProbe('busy', 5_000)
+      return null
+    }
+    return this.withLock(async () => {
+      if (this._inFlight > 0) {
+        this._scheduleSmartProbe('busy', 5_000)
+        return null
+      }
+      try {
+        // Deliberately omit instanceId: this is a read-only account snapshot,
+        // not a session refresh. Never overwrite this.session/instanceId here.
+        const body = await this.upstream.freebuffSession('GET')
+        const accountLevel = accountLevelSessionStatus(body?.status)
+        if (accountLevel) {
+          this._setLastProbe({
+            ok: false,
+            code: accountLevel,
+            status: null,
+            message: body?.message || null,
+          })
+          if (accountLevel === 'rate_limited' || accountLevel === 'free_mode_rate_limited') {
+            this._increaseSmartProbeBackoff()
+            this._scheduleSmartProbe('rate_limited', this._smartProbeBackoffMs)
+          }
+          return body
+        }
+
+        const quota = extractQuota(body)
+        const freebucks = extractFreebucks(body)
+        const entitlements = extractSessionEntitlements(body)
+        if (quota) this.quota = quota
+        if (freebucks) this.freebucks = freebucks
+        if (entitlements) this.entitlements = entitlements
+        this._lastSmartProbeAt = Date.now()
+        this._smartProbeBackoffMs = 0
+        this._setLastProbe({ ok: true })
+        if (quota || freebucks || entitlements) this._notifyStateChange()
+        this._scheduleResetProbe()
+        return body
+      } catch (err) {
+        if (err?.status === 429 || err?.code === 'rate_limited' || err?.code === 'free_mode_rate_limited') {
+          this._increaseSmartProbeBackoff()
+          this._scheduleSmartProbe('rate_limited', this._smartProbeBackoffMs)
+        }
+        this._setLastProbe({
+          ok: false,
+          code: err?.code || (err instanceof Error ? err.name : null),
+          status: err?.status ?? null,
+          message: err instanceof Error ? err.message : String(err),
+        })
+        throw err
+      }
+    })
+  }
+
+  _clearSmartProbe() {
+    if (this._smartProbeTimer) {
+      clearTimeout(this._smartProbeTimer)
+      this._smartProbeTimer = null
+    }
+    this._smartProbeDueAt = 0
   }
 
   _armPoll() {
