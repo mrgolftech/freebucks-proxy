@@ -6,6 +6,7 @@ import { createUpstreamClient } from '../upstream/client.js'
 import {
   generateFingerprintId,
   saveAccountUser,
+  readAccountUser,
   accountKeyOf,
 } from '../auth-store.js'
 import { logger } from '../util/log.js'
@@ -130,19 +131,28 @@ export class LoginFlowManager {
    * Start a new login flow.
    * @returns {Promise<{id: string, loginUrl: string, status: string, createdAt: string, expiresAt: string}>}
    */
-  async start() {
-    const upstream = createUpstreamClient(this.config, '')
-    const fingerprintId = generateFingerprintId()
+  async start({ proxy = null } = {}) {
+    // flow id 同时作为“登录设备隔离 scope”：同一流程稳定、不同账号首次登录不再
+    // 共用容器级 host fingerprint。先生成 id，再请求 login code，保证 code/status
+    // 两阶段使用完全相同的 fingerprint + 出口代理。
+    const id = randomUUID()
+    const fingerprintId = generateFingerprintId(id)
+    const upstream = createUpstreamClient(this.config, '', {
+      proxy: proxy || null,
+      accountId: `login:${id}`,
+    })
     const code = await upstream.loginCode(fingerprintId)
     if (!code?.loginUrl) {
       throw new Error('Freebuff 登录接口未返回 loginUrl')
     }
     const flow = {
-      id: randomUUID(),
+      id,
       status: 'pending',
       loginUrl: code.loginUrl,
       fingerprintId,
       fingerprintHash: code.fingerprintHash,
+      // 代理从登录第一步就固定下来；后续 status 轮询与账号 runtime 都沿用它。
+      proxy: proxy || null,
       expiresAt: code.expiresAt,
       createdAt: new Date().toISOString(),
       error: null,
@@ -204,14 +214,29 @@ export class LoginFlowManager {
         continue
       }
       try {
-        const upstream = createUpstreamClient(this.config, '')
+        const upstream = createUpstreamClient(this.config, '', {
+          proxy: flow.proxy || null,
+          accountId: `login:${flow.id}`,
+        })
         const st = await upstream.loginStatus({
           fingerprintId: flow.fingerprintId,
           fingerprintHash: flow.fingerprintHash,
           expiresAt: flow.expiresAt,
         })
         if (st?.user?.authToken) {
-          const saved = saveAccountUser(this.credentialsDir, st.user)
+          // 上游 user 响应未必把 CLI 登录使用的 fingerprint 带回来；显式写入凭据，
+          // 避免控制台看到所有账号都退化成同一个宿主机指纹/或根本没有指纹。
+          // 若这是“重新登录已有账号”且本次没指定代理，则保留原账号专属代理。
+          const existing = readAccountUser(
+            this.credentialsDir,
+            accountKeyOf(st.user),
+          )
+          const saved = saveAccountUser(this.credentialsDir, {
+            ...st.user,
+            fingerprintId: flow.fingerprintId,
+            fingerprintHash: flow.fingerprintHash,
+            proxy: flow.proxy || existing?.proxy || st.user.proxy || null,
+          })
           // 记「凭证更新时间」：浏览器登录回调也是写凭据的入口之一。
           try {
             this._onCredentialSaved?.(saved.key)
