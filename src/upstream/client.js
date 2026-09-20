@@ -58,7 +58,6 @@ export function extractRateLimitWindowMs(body, fallbackMs = null) {
     fallbackMs,
     body?.retryAfterMs,
     body?.retry_after_ms,
-    body?.retryAfter,
   ]
   for (const raw of candidates) {
     const n = Number(raw)
