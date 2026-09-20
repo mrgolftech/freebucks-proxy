@@ -669,9 +669,6 @@ tr.account-disabled td:first-child {
 /* 表格安全网：极窄屏下允许横向滚动，而不是把单元格压到无法阅读。
    表格用 min-width 保证各列有呼吸空间，overflow-x 已经在 .table-wrap 上。 */
 .table-wrap > table { min-width: 1220px; }
-@media (max-width: 1080px) {
-  .table-wrap > table { min-width: 0; }
-}
 
 /* ---------- view transition ---------- */
 .view-enter { animation: viewIn .35s var(--ease) both; }
