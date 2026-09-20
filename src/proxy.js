@@ -52,7 +52,7 @@ import {
   restoreToolNamesInResponse,
   rewriteToolNamesForUpstream,
 } from './tool-mapper.js'
-import { logger } from './util/log.js'
+import { logger } from './util/log.js'\nimport { validateStrictToolsRequest } from './strict-tools.js'
 
 /**
  * OpenAI-compatible surface under /v1 only.
@@ -582,6 +582,12 @@ export function createProxyHandler(ctx) {
           type: 'invalid_request_error',
         },
       })
+      return
+    }
+
+    const strictTools = validateStrictToolsRequest(body)
+    if (!strictTools.ok) {
+      sendJson(res, 400, { error: strictTools.error })
       return
     }
 
