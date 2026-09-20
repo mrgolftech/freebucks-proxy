@@ -5,7 +5,7 @@ import path from 'node:path'
 import net from 'node:net'
 import http from 'node:http'
 import { loadConfig } from '../src/config.js'
-import { AccountRuntimes } from '../src/app-context.js'
+import { AccountRuntimes, buildAppContext } from '../src/app-context.js'
 import { SessionHandleStore } from '../src/session-handles.js'
 import { startServer } from '../src/server.js'
 import { SessionManager } from '../src/session-manager.js'
@@ -2239,6 +2239,65 @@ for (const model of verifiedSpecialModels) {
   fs.rmSync(pDir, { recursive: true, force: true })
 }
 
+// --- manual account enable/disable: persistence + scheduler exclusion + all-disabled startup ---
+{
+  const dDir = fs.mkdtempSync(path.join(os.tmpdir(), 'fb-proxy-disabled-'))
+  saveAccountUser(dDir, {
+    id: 'da',
+    email: 'da@example.com',
+    authToken: 'token-da',
+    enabled: false,
+  })
+  // 老凭据没有 enabled 字段时必须默认启用，保证升级不改变既有账号行为。
+  saveAccountUser(dDir, {
+    id: 'db',
+    email: 'db@example.com',
+    authToken: 'token-db',
+  })
+  const dConfig = loadConfig()
+  dConfig.upstream.credentialsDir = dDir
+  dConfig.session.pollIntervalSec = 3600
+  const dPool = new AccountRuntimes(dConfig)
+
+  assert.deepEqual(dPool.enabledKeys(), ['db'])
+  assert.deepEqual(
+    dPool.candidateKeys('deepseek/deepseek-v4-flash'),
+    ['db'],
+    '手工停用账号不得进入调度候选',
+  )
+  const daRow = dPool.list().find((x) => x.key === 'da')
+  const dbRow = dPool.list().find((x) => x.key === 'db')
+  assert.equal(daRow.enabled, false)
+  assert.equal(daRow.available, false)
+  assert.equal(daRow.status, 'disabled')
+  assert.equal(dbRow.enabled, true, '旧账号缺 enabled 字段时默认启用')
+
+  // 全部停用仍然必须允许服务构建/控制台启动，只是 chat 调度返回明确错误。
+  saveAccountUser(dDir, {
+    id: 'db',
+    email: 'db@example.com',
+    authToken: 'token-db',
+    enabled: false,
+  })
+  const allOff = new AccountRuntimes(dConfig)
+  assert.deepEqual(allOff.enabledKeys(), [])
+  assert.deepEqual(allOff.candidateKeys('deepseek/deepseek-v4-flash'), [])
+  const ctx = buildAppContext(dConfig)
+  assert.equal(ctx.authToken, null, '全停用时 buildAppContext 不得因 getAny() 让服务启动失败')
+  let noEnabled = null
+  try {
+    await allOff.acquireForModel('deepseek/deepseek-v4-flash')
+  } catch (err) {
+    noEnabled = err
+  }
+  assert.equal(noEnabled?.code, 'no_enabled_account')
+
+  await ctx.runtimes.shutdown()
+  await allOff.shutdown()
+  await dPool.shutdown()
+  fs.rmSync(dDir, { recursive: true, force: true })
+}
+
 // --- 全局代理池：稳定哈希分配 + 账号覆盖优先 ---
 {
   const poolConfig = loadConfig()
@@ -2553,6 +2612,37 @@ for (const model of verifiedSpecialModels) {
     })
     assert.equal(bind.status, 200)
     assert.equal((await bind.json()).proxy, 'http://p1.example:7890')
+    assert.equal(readAccountUser(wDir, 'w').proxy, 'http://p1.example:7890')
+
+    // PATCH 是部分更新：只改 enabled 绝不能顺手清掉账号专属 proxy。
+    const disable = await fetch(`http://127.0.0.1:${wport}/api/accounts/w`, {
+      method: 'PATCH',
+      headers: { cookie, 'content-type': 'application/json' },
+      body: JSON.stringify({ enabled: false }),
+    })
+    assert.equal(disable.status, 200)
+    const disabledBody = await disable.json()
+    assert.equal(disabledBody.enabled, false)
+    assert.equal(disabledBody.proxy, 'http://p1.example:7890')
+    assert.equal(readAccountUser(wDir, 'w').enabled, false)
+    assert.equal(readAccountUser(wDir, 'w').proxy, 'http://p1.example:7890')
+    assert.equal(wruntimes.list().find((x) => x.key === 'w').status, 'disabled')
+
+    const badEnabled = await fetch(`http://127.0.0.1:${wport}/api/accounts/w`, {
+      method: 'PATCH',
+      headers: { cookie, 'content-type': 'application/json' },
+      body: JSON.stringify({ enabled: 'yes' }),
+    })
+    assert.equal(badEnabled.status, 400)
+    assert.equal(readAccountUser(wDir, 'w').enabled, false)
+
+    const enable = await fetch(`http://127.0.0.1:${wport}/api/accounts/w`, {
+      method: 'PATCH',
+      headers: { cookie, 'content-type': 'application/json' },
+      body: JSON.stringify({ enabled: true }),
+    })
+    assert.equal(enable.status, 200)
+    assert.equal((await enable.json()).enabled, true)
     assert.equal(readAccountUser(wDir, 'w').proxy, 'http://p1.example:7890')
 
     const unbind = await fetch(`http://127.0.0.1:${wport}/api/accounts/w`, {
