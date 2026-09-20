@@ -2805,14 +2805,17 @@ async function openAccountProxyModal(account) {
     body.append(el('h3', {}, '读取代理池失败'), el('p', { class: 'muted' }, err.message))
     return
   }
-  const proxies = Array.isArray(pdata.proxies) ? pdata.proxies : []
+  // 与“新增账号”共用同一套可用出口口径：不仅看控制台代理池，还包括
+  // config/env 实际生效出口、现有账号绑定/当前出口，以及上一轮成功缓存。
+  // 避免实际正走环境代理时，这里却误报“代理池为空”并逼用户重新手填。
+  const proxies = collectAvailableProxies(pdata, state.proxies)
   state.proxies = proxies
 
-  // 未绑定账号若当前正由全局池分到一个出口，默认把这个出口选中：
+  // 未绑定账号若当前已有一个可用的实际出口，默认把它选中：
   // 用户直接点“保存绑定”就能把当前 IP 冻结下来，不必复制粘贴。
-  const currentPoolProxy =
+  const currentEffectiveProxy =
     !account.proxy && proxies.includes(account.effectiveProxy) ? account.effectiveProxy : ''
-  const initial = account.proxy || currentPoolProxy || ''
+  const initial = account.proxy || currentEffectiveProxy || ''
 
   body.innerHTML = ''
   // ⚠️ 这里原来是 `input + datalist`：候选项本来就是代理池里固定那几个出口，
@@ -2841,7 +2844,8 @@ async function openAccountProxyModal(account) {
 
   const customInput = el('input', {
     id: 'account-proxy-input',
-    value: account.proxy && !proxies.includes(account.proxy) ? account.proxy : '',
+    // 自定义时预填当前绑定，方便只改 host/port/凭据，不必整段重新输入。
+    value: account.proxy || '',
     placeholder: '例如 http://user:pass@127.0.0.1:7890',
     autocomplete: 'off',
     style: 'display:none;margin-top:8px',
@@ -2861,8 +2865,8 @@ async function openAccountProxyModal(account) {
     customInput,
     proxies.length
       ? el('p', { class: 'muted', style: 'font-size:12px;margin-top:6px' },
-          `代理池共有 ${proxies.length} 个出口。当前：${account.proxy ? '已固定绑定' : account.effectiveProxy ? '池分配 ' + shortProxy(account.effectiveProxy) : '直连'}。`)
-      : el('p', { class: 'muted', style: 'font-size:12px;margin-top:6px' }, '当前代理池为空，请选“自定义…”手工填入一个有效代理 URL。'),
+          `可选出口共有 ${proxies.length} 个。当前：${account.proxy ? '已固定绑定' : account.effectiveProxy ? '实际出口 ' + shortProxy(account.effectiveProxy) : '直连'}。`)
+      : el('p', { class: 'muted', style: 'font-size:12px;margin-top:6px' }, '当前没有可用出口，请选“自定义…”手工填入一个有效代理 URL。'),
     el('div', { class: 'row', style: 'margin-top:12px' }, [
       el('button', { class: 'primary', onclick: async (e) => {
         const restore = withButtonLoading(e.currentTarget, '保存中')
