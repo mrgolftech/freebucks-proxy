@@ -6,7 +6,13 @@ import {
   serializeCookie,
 } from '../util/http.js'
 import { ProxyAgent, fetch as undiciFetch } from 'undici'
-import { buildModelsListResponse, modelIdsFromSession, agentIdForModel, agentFallbackForModel } from '../model.js'
+import {
+  buildModelsListResponse,
+  modelIdsFromSession,
+  modelAdmissionState,
+  agentIdForModel,
+  agentFallbackForModel,
+} from '../model.js'
 import {
   saveAccountUser,
   coerceUser,
@@ -138,6 +144,11 @@ export function createWebApi(deps) {
     const prices = new Map()
     let base = null
     let baseFreebucks = null
+    let mergedAccessTier = null
+    let mergedSubscriptionTierId = null
+    let mergedLimitedOfferReason = null
+    /** @type {Map<string, any>} */
+    const mergedOffers = new Map()
     for (const row of rows) {
       // 双保险：凭据可能在 list() 之后被用户即时停用。
       if (typeof runtimes.isEnabled === 'function' && !runtimes.isEnabled(row.key)) continue
@@ -147,6 +158,30 @@ export function createWebApi(deps) {
         const snap = rt.sessions.getSnapshot()
         if (!base) base = s
         if (!baseFreebucks && snap?.freebucks) baseFreebucks = snap.freebucks
+
+        const ent = snap?.entitlements || null
+        if (ent?.accessTier === 'full' || ent?.accessTier === 'free') {
+          mergedAccessTier = ent.accessTier
+        } else if (!mergedAccessTier && ent?.accessTier === 'limited') {
+          mergedAccessTier = 'limited'
+        }
+        if (!mergedSubscriptionTierId && ent?.subscription?.tierId) {
+          mergedSubscriptionTierId = ent.subscription.tierId
+        }
+        if (!mergedLimitedOfferReason && ent?.limitedOfferReason) {
+          mergedLimitedOfferReason = ent.limitedOfferReason
+        }
+        for (const offer of ent?.limitedModelOffers || []) {
+          if (!offer?.model) continue
+          const prev = mergedOffers.get(offer.model)
+          if (
+            !prev ||
+            Number(offer.remaining || 0) > Number(prev.remaining || 0) ||
+            Number(offer.userRemaining || 0) > Number(prev.userRemaining || 0)
+          ) {
+            mergedOffers.set(offer.model, offer)
+          }
+        }
 
         // ⚠️ refresh() 返回的是**本地 session 快照**（status/instanceId/expiresAt…），
         // 不含上游的 rateLimitsByModel —— 额度在 quota.byModel 上（_apply 里由
@@ -202,6 +237,15 @@ export function createWebApi(deps) {
       ...(base || {}),
       rateLimitsByModel: Object.fromEntries(limits),
       freebucks,
+      accessTier: mergedAccessTier || base?.accessTier || null,
+      subscription:
+        mergedSubscriptionTierId
+          ? { ...(base?.subscription || {}), tierId: mergedSubscriptionTierId }
+          : base?.subscription || null,
+      limitedModelOffers:
+        mergedOffers.size ? [...mergedOffers.values()] : base?.limitedModelOffers || [],
+      limitedOfferReason:
+        mergedLimitedOfferReason || base?.limitedOfferReason || null,
       model:
         base?.model ||
         [...limits.keys()][0] ||
@@ -433,7 +477,11 @@ export function createWebApi(deps) {
       // 的首屏路径，必须秒开。要强制拿最新目录用「一键刷新」/「同步上游模型」，
       // 它们走 probeAllAccountsSession() 与 probeUpstreamSessionFresh()。
       const session = await probeUpstreamSession()
-      if (session?.accessTier === 'full' || session?.accessTier === 'limited') {
+      if (
+        session?.accessTier === 'full' ||
+        session?.accessTier === 'limited' ||
+        session?.accessTier === 'free'
+      ) {
         accessTier = session.accessTier
       }
       // 统一目录口径：rateLimits / limited offers / 当前模型 / Freebucks
@@ -444,6 +492,17 @@ export function createWebApi(deps) {
         200,
         buildModelsListResponse({
           accessTier,
+          subscriptionTierId:
+            typeof session?.subscription?.tierId === 'string'
+              ? session.subscription.tierId
+              : null,
+          limitedOffers: Array.isArray(session?.limitedModelOffers)
+            ? session.limitedModelOffers
+            : [],
+          limitedOfferReason:
+            typeof session?.limitedOfferReason === 'string'
+              ? session.limitedOfferReason
+              : null,
           extraIds,
           includeAllCatalog: true,
           customModels: modelStore ? modelStore.list() : [],
@@ -592,8 +651,23 @@ export function createWebApi(deps) {
         // 的表缺了半个上游目录。这里把 prices 有而 limits 没有的 id 补成一行：
         // limit/recentCount = null（确实没有次数额度），pool = 'freebucks'
         // （只用于展示，调度与白名单只判断 `pool === 'premium'`，不受影响）。
+        const admissionOpts = {
+          accessTier: session?.accessTier ?? null,
+          subscriptionTierId:
+            typeof session?.subscription?.tierId === 'string'
+              ? session.subscription.tierId
+              : null,
+          limitedOffers: Array.isArray(session?.limitedModelOffers)
+            ? session.limitedModelOffers
+            : [],
+          limitedOfferReason:
+            typeof session?.limitedOfferReason === 'string'
+              ? session.limitedOfferReason
+              : null,
+        }
         const models = Object.entries(limits).map(([id, info]) => ({
           id,
+          ...modelAdmissionState(id, admissionOpts),
           limit: info?.limit ?? null,
           recentCount: info?.recentCount ?? null,
           freebucksPerHour: Number.isFinite(prices[id]) ? prices[id] : null,
@@ -613,6 +687,7 @@ export function createWebApi(deps) {
           if (seen.has(id) || !Number.isFinite(price)) continue
           models.push({
             id,
+            ...modelAdmissionState(id, admissionOpts),
             // 钱包计费模型没有「今日 已用/上限」次数，留 null 让前端走单价分支，
             // 不要用 0 冒充额度（0 会被误读成「已用完」）。
             limit: null,
@@ -635,6 +710,17 @@ export function createWebApi(deps) {
         sendJson(res, 200, {
           models,
           accessTier: session?.accessTier ?? null,
+          subscriptionTierId:
+            typeof session?.subscription?.tierId === 'string'
+              ? session.subscription.tierId
+              : null,
+          limitedModelOffers: Array.isArray(session?.limitedModelOffers)
+            ? session.limitedModelOffers
+            : [],
+          limitedOfferReason:
+            typeof session?.limitedOfferReason === 'string'
+              ? session.limitedOfferReason
+              : null,
           // 上游此刻真实给出的模型清单（多账号取并集）：前端据此区分
           // "目录里有"与"上游此刻确实给额度"，而不是靠一个布尔开关。
           // 口径保持**限流表**：freebucks 计费模型不在这里（它们靠价格表出现），
