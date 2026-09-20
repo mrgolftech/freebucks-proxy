@@ -138,6 +138,10 @@ configureLogger({ level: 'error' })
     '账号表必须展示 accessTier/subscription/offer，而不是只在后端保存',
   )
   assert.ok(
+    dashboardJs.includes("'模型冷却 ' + modelCooldowns.length"),
+    '账号授权列必须展示 per-model 429 refusal memory，避免误以为整号不可用',
+  )
+  assert.ok(
     dashboardJs.includes('function modelAdmissionCell(m)'),
     '模型管理必须展示 plan_required/offer/trial/withdrawn 等准入状态',
   )
@@ -3164,6 +3168,66 @@ for (const model of verifiedSpecialModels) {
   await pool.shutdown()
   server.close()
   fs.rmSync(dir, { recursive: true, force: true })
+}
+
+// --- trefeon #624: expiring 429 memory is per account+model, opaque 429 is not sticky ---
+{
+  const rlDir = fs.mkdtempSync(path.join(os.tmpdir(), 'fb-proxy-model-429-'))
+  saveAccountUser(rlDir, { id: 'ra', email: 'ra@example.com', authToken: 'token-ra' })
+  saveAccountUser(rlDir, { id: 'rb', email: 'rb@example.com', authToken: 'token-rb' })
+  const rlConfig = loadConfig()
+  rlConfig.upstream.credentialsDir = rlDir
+  rlConfig.session.pollIntervalSec = 3600
+  const pool = new AccountRuntimes(rlConfig)
+
+  const modelA = 'deepseek/deepseek-v4-flash'
+  const modelB = 'mimo/mimo-v2.5'
+
+  // Explicit refusal window: only ra+modelA is parked.
+  const remembered = pool.markCooldown(
+    'ra',
+    {
+      code: 'rate_limited',
+      retryAfterMs: 60_000,
+    },
+    modelA,
+  )
+  assert.equal(remembered.remembered, true)
+  assert.equal(remembered.scope, 'model')
+  assert.deepEqual(
+    pool.candidateKeys(modelA),
+    ['rb'],
+    'same model must skip the remembered lane with no upstream contact',
+  )
+  assert.deepEqual(
+    pool.candidateKeys(modelB),
+    ['ra', 'rb'],
+    'different model must still be allowed on the same account',
+  )
+  const rowA = pool.list().find((x) => x.key === 'ra')
+  assert.equal(rowA.available, true, 'model cooldown must not mark the whole account unavailable')
+  assert.equal(rowA.modelCooldowns.length, 1)
+  assert.equal(rowA.modelCooldowns[0].model, modelA)
+  assert.equal(rowA.modelCooldowns[0].code, 'rate_limited')
+
+  // Explicitly clearing that model revives only that lane.
+  pool.clearCooldown('ra', modelA)
+  assert.deepEqual(pool.candidateKeys(modelA), ['ra', 'rb'])
+
+  // Opaque 429: never persist a cooldown. Current-request failover is handled
+  // through skipKeys in reacquireAfterGate; a later request probes live again.
+  const opaque = pool.markCooldown('ra', { code: 'rate_limited' }, modelA)
+  assert.equal(opaque.remembered, false)
+  assert.equal(pool.isCoolingDown('ra', modelA), false)
+  assert.deepEqual(pool.candidateKeys(modelA), ['ra', 'rb'])
+
+  // Account-level 429 without a model retains legacy whole-account behavior.
+  pool.markCooldown('ra', { code: 'rate_limited', retryAfterMs: 60_000 })
+  assert.equal(pool.isCoolingDown('ra'), true)
+  assert.deepEqual(pool.candidateKeys(modelB), ['rb'])
+
+  await pool.shutdown()
+  fs.rmSync(rlDir, { recursive: true, force: true })
 }
 
 // --- quota: extraction + display；已用满的冷账号排到可用冷账号之后 ---
