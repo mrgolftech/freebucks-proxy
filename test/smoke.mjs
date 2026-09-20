@@ -123,6 +123,40 @@ configureLogger({ level: 'error' })
   )
 }
 
+// --- dashboard: tier/offer/admission 可视化必须跟随后端状态 ---
+{
+  const dashboardJs = fs.readFileSync(
+    path.join(process.cwd(), 'dashboard', 'app.js'),
+    'utf8',
+  )
+  const apiSrc = fs.readFileSync(
+    path.join(process.cwd(), 'src', 'web', 'api.js'),
+    'utf8',
+  )
+  assert.ok(
+    dashboardJs.includes('function accountEntitlementCell(a)'),
+    '账号表必须展示 accessTier/subscription/offer，而不是只在后端保存',
+  )
+  assert.ok(
+    dashboardJs.includes('function modelAdmissionCell(m)'),
+    '模型管理必须展示 plan_required/offer/trial/withdrawn 等准入状态',
+  )
+  assert.ok(
+    dashboardJs.includes("liveCatalog = await api('/api/models')"),
+    '模型管理必须读取 entitlement-aware /api/models，而不是只看价格表',
+  )
+  assert.ok(
+    apiSrc.includes('modelAdmissionState(id, admissionOpts)'),
+    '/api/models/upstream 必须把已验证的准入状态一起返回给前端',
+  )
+  assert.ok(
+    apiSrc.includes('subscriptionTierId:') &&
+      apiSrc.includes('limitedOffers:') &&
+      apiSrc.includes('limitedOfferReason:'),
+    '/api/models 必须把 subscription/offer 上下文传给模型准入计算',
+  )
+}
+
 // --- unit: Freebucks 价格表模型必须进入统一目录，且按计费会话调度 ---
 {
   const ids = modelIdsFromSession({
