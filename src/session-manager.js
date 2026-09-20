@@ -1,5 +1,5 @@
 import { logger } from './util/log.js'
-import { UpstreamError } from './upstream/client.js'
+import { UpstreamError, extractRateLimitWindowMs } from './upstream/client.js'
 import { isFreeModel } from './model.js'
 
 /** 账号级故障状态码（回执反映账号处境，不反映某条会话的生死）。 */
@@ -800,7 +800,7 @@ export class SessionManager {
         status: statusMap[st] || 502,
         code: st,
         body: { ...body, requestedModel: model },
-        retryAfterMs: body?.retryAfterMs,
+        retryAfterMs: extractRateLimitWindowMs(body) ?? undefined,
       },
     )
   }
