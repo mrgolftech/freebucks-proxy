@@ -28,6 +28,7 @@ import {
   saveAccountUser,
   listAccounts,
   readAccountUser,
+  generateFingerprintId,
   invalidCredentialFiles,
 } from '../src/auth-store.js'
 import {
@@ -70,6 +71,19 @@ import {
 } from '../src/upstream/client.js'
 
 configureLogger({ level: 'error' })
+
+// --- unit: CLI 登录指纹：默认主机指纹稳定；Web flow scope 隔离且流程内稳定 ---
+{
+  const hostFp1 = generateFingerprintId()
+  const hostFp2 = generateFingerprintId()
+  const flowA1 = generateFingerprintId('flow-a')
+  const flowA2 = generateFingerprintId('flow-a')
+  const flowB = generateFingerprintId('flow-b')
+  assert.equal(hostFp1, hostFp2, 'CLI 默认 fingerprint 应在同一主机稳定')
+  assert.equal(flowA1, flowA2, '同一登录 flow 的 fingerprint 必须稳定')
+  assert.notEqual(flowA1, flowB, '不同登录 flow 不应共用同一个 fingerprint')
+  assert.notEqual(flowA1, hostFp1, 'Web flow fingerprint 不应退化成宿主机公共 fingerprint')
+}
 
 // --- unit: universal foreign-harness tool-name virtualization ---
 {
@@ -2521,6 +2535,34 @@ for (const model of verifiedSpecialModels) {
 
     const g2 = await fetch(`http://127.0.0.1:${wport}/api/proxy`, { headers: { cookie } })
     assert.deepEqual((await g2.json()).proxies, ['http://p1.example:7890', 'http://p2.example:7890'])
+
+    // 账号专属代理绑定：非法值必须拒绝，合法值持久化；取消后恢复全局池策略。
+    // 这道校验很关键：不能把畸形“绑定”静默当 null，否则账号会悄悄回落代理池并换 IP。
+    const badBind = await fetch(`http://127.0.0.1:${wport}/api/accounts/w`, {
+      method: 'PATCH',
+      headers: { cookie, 'content-type': 'application/json' },
+      body: JSON.stringify({ proxy: 'not a url' }),
+    })
+    assert.equal(badBind.status, 400)
+    assert.equal(readAccountUser(wDir, 'w').proxy, null, '非法绑定不得污染账号凭据')
+
+    const bind = await fetch(`http://127.0.0.1:${wport}/api/accounts/w`, {
+      method: 'PATCH',
+      headers: { cookie, 'content-type': 'application/json' },
+      body: JSON.stringify({ proxy: 'http://p1.example:7890' }),
+    })
+    assert.equal(bind.status, 200)
+    assert.equal((await bind.json()).proxy, 'http://p1.example:7890')
+    assert.equal(readAccountUser(wDir, 'w').proxy, 'http://p1.example:7890')
+
+    const unbind = await fetch(`http://127.0.0.1:${wport}/api/accounts/w`, {
+      method: 'PATCH',
+      headers: { cookie, 'content-type': 'application/json' },
+      body: JSON.stringify({ proxy: null }),
+    })
+    assert.equal(unbind.status, 200)
+    assert.equal((await unbind.json()).proxy, null)
+    assert.equal(readAccountUser(wDir, 'w').proxy, null)
 
     // 清空 → 全局池空
     await fetch(`http://127.0.0.1:${wport}/api/proxy`, {
