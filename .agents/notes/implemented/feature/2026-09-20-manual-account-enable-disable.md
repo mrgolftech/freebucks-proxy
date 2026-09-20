@@ -26,7 +26,8 @@ Status: implemented
   `available=false`、`status='disabled'`，与封禁/冷却区分。
 - 新增 `enabledKeys()` / `isEnabled()`。自动选号 `candidateKeys()`、
   `acquireForModel()`、`getAny()` 只从启用账号中选择。
-- `get(key)` **不禁止**读取停用账号：单账号探测、查看凭据、改代理、重新启用仍然需要它。
+- `get(key)` **不禁止**读取停用账号：单账号显式探测、查看凭据、改代理、重新启用仍然需要它。
+- 批量 `/probe` / `/refresh` 跳过停用账号，避免“已停用但后台刷新仍主动碰上游”；只有用户明确点该账号的单账号检测才允许诊断访问。
 - 请求执行期间如果用户停用当前账号，当前在途流允许自然结束；后续重试/重新 admit
   检查 `isEnabled()` 后绕开该账号。
 - 控制台 PATCH 是真正的部分更新：只改 `enabled` 时不改变 `proxy`，反之亦然。
@@ -68,5 +69,6 @@ Status: implemented
   - 全部停用时 `buildAppContext()` 仍成功，`acquireForModel()` 返回
     `no_enabled_account`；
   - Web PATCH 只改 enabled 时保留专属 proxy；
+  - 批量探测对停用账号返回 skipped/disabled，且不会重新创建它的 runtime；
   - enabled 非 boolean 时返回 400；
   - 停用后重新启用可正常恢复。
