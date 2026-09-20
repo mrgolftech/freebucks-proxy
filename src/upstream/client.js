@@ -45,6 +45,41 @@ function parseRetryAfterMs(value) {
 }
 
 /**
+ * Extract an explicit upstream refusal window.  Mirrors the lifecycle rule in
+ * trefeon #624: only a refusal with Retry-After/retryAfterMs/future resetAt is
+ * safe to remember; opaque 429s must be retried live on a later request.
+ *
+ * @param {any} body
+ * @param {number | null | undefined} fallbackMs
+ * @returns {number | null}
+ */
+export function extractRateLimitWindowMs(body, fallbackMs = null) {
+  const candidates = [
+    fallbackMs,
+    body?.retryAfterMs,
+    body?.retry_after_ms,
+    body?.retryAfter,
+  ]
+  for (const raw of candidates) {
+    const n = Number(raw)
+    if (Number.isFinite(n) && n > 0) return Math.ceil(n)
+  }
+
+  const resetCandidates = [
+    body?.resetAt,
+    body?.reset_at,
+    body?.rateLimit?.resetAt,
+    body?.rateLimit?.reset_at,
+  ]
+  for (const raw of resetCandidates) {
+    if (!raw) continue
+    const t = Date.parse(raw)
+    if (Number.isFinite(t) && t > Date.now()) return t - Date.now()
+  }
+  return null
+}
+
+/**
  * 带单次超时的 undici fetch：超时主动 abort 本次尝试。用独立的子 AbortController
  * 级联父 signal——单次尝试超时只拆掉这一次请求（回落池内下一个），不会把整个
  * 请求/其他代理尝试一起 abort；父 signal（客户端断开 / 全局超时）abort 时本次
@@ -478,9 +513,20 @@ export function createUpstreamClient(config, token, opts = {}) {
         body = { raw: text }
       }
       if (!res.ok) {
+        const rateCode =
+          res.status === 429 ? extractRateLimitError(body) || 'rate_limited' : null
+        const retryAfterMs = extractRateLimitWindowMs(
+          body,
+          parseRetryAfterMs(res.headers.get('retry-after')),
+        )
         throw new UpstreamError(
           `startAgentRun failed: ${res.status} ${text.slice(0, 200)}`,
-          { status: res.status, code: 'start_agent_run_failed', body },
+          {
+            status: res.status,
+            code: rateCode || 'start_agent_run_failed',
+            body,
+            retryAfterMs: retryAfterMs ?? undefined,
+          },
         )
       }
       const runId = body?.runId
