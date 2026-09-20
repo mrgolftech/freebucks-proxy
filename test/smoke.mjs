@@ -72,6 +72,18 @@ import {
 
 configureLogger({ level: 'error' })
 
+// --- dashboard JS 至少必须可被浏览器解析（dashboard 不在 tsc include 范围内） ---
+{
+  const dashboardJs = fs.readFileSync(
+    path.join(process.cwd(), 'dashboard', 'app.js'),
+    'utf8',
+  )
+  assert.doesNotThrow(
+    () => new Function(dashboardJs),
+    'dashboard/app.js must remain syntactically valid',
+  )
+}
+
 // --- unit: CLI 登录指纹：默认主机指纹稳定；Web flow scope 隔离且流程内稳定 ---
 {
   const hostFp1 = generateFingerprintId()
