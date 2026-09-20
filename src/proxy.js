@@ -106,6 +106,38 @@ export function createProxyHandler(ctx) {
     return ids
   }
 
+  function runtimeKnownEntitlements() {
+    let accessTier = null
+    let subscriptionTierId = null
+    let limitedOfferReason = null
+    const offers = new Map()
+    for (const row of runtimes.list()) {
+      if (row.enabled === false) continue
+      const ent = row.entitlements || row.session?.entitlements || null
+      if (!ent) continue
+      if (ent.accessTier === 'full' || ent.accessTier === 'free') {
+        accessTier = ent.accessTier
+      } else if (!accessTier && ent.accessTier === 'limited') {
+        accessTier = 'limited'
+      }
+      if (!subscriptionTierId && ent.subscription?.tierId) {
+        subscriptionTierId = ent.subscription.tierId
+      }
+      if (!limitedOfferReason && ent.limitedOfferReason) {
+        limitedOfferReason = ent.limitedOfferReason
+      }
+      for (const offer of ent.limitedModelOffers || []) {
+        if (offer?.model && !offers.has(offer.model)) offers.set(offer.model, offer)
+      }
+    }
+    return {
+      accessTier,
+      subscriptionTierId,
+      limitedOffers: [...offers.values()],
+      limitedOfferReason,
+    }
+  }
+
   async function probeUpstreamSessionCached() {
     const now = Date.now()
     const known = runtimeKnownModelIds()
@@ -120,7 +152,11 @@ export function createProxyHandler(ctx) {
     }
     const ids = known
     let model = null
-    let accessTier = null
+    const knownEntitlements = runtimeKnownEntitlements()
+    let accessTier = knownEntitlements.accessTier
+    let subscriptionTierId = knownEntitlements.subscriptionTierId
+    let limitedOffers = knownEntitlements.limitedOffers
+    let limitedOfferReason = knownEntitlements.limitedOfferReason
     try {
       const rt = runtimes.getAny()
       const session = await rt.upstream.freebuffSession('GET')
@@ -130,13 +166,34 @@ export function createProxyHandler(ctx) {
           ? session.model
           : null
       accessTier =
-        session?.accessTier === 'full' || session?.accessTier === 'limited'
+        session?.accessTier === 'full' ||
+        session?.accessTier === 'limited' ||
+        session?.accessTier === 'free'
           ? session.accessTier
-          : null
+          : accessTier
+      subscriptionTierId =
+        typeof session?.subscription?.tierId === 'string'
+          ? session.subscription.tierId
+          : subscriptionTierId
+      limitedOffers = Array.isArray(session?.limitedModelOffers)
+        ? session.limitedModelOffers
+        : limitedOffers
+      limitedOfferReason =
+        typeof session?.limitedOfferReason === 'string'
+          ? session.limitedOfferReason
+          : limitedOfferReason
     } catch {
       // fail-open 到本地已知快照：控制面刚 fresh 过时仍能保留完整目录。
     }
-    sessionProbeCache = { ids: [...ids], model, accessTier, at: now }
+    sessionProbeCache = {
+      ids: [...ids],
+      model,
+      accessTier,
+      subscriptionTierId,
+      limitedOffers,
+      limitedOfferReason,
+      at: now,
+    }
     return sessionProbeCache
   }
 
@@ -255,6 +312,9 @@ export function createProxyHandler(ctx) {
 
   async function handleModels(res) {
     let accessTier = null
+    let subscriptionTierId = null
+    let limitedOffers = []
+    let limitedOfferReason = null
     /** @type {string[]} */
     let extraIds = []
     try {
@@ -263,6 +323,9 @@ export function createProxyHandler(ctx) {
         probe?.accessTier === 'full' || probe?.accessTier === 'limited'
           ? probe.accessTier
           : null
+      subscriptionTierId = probe?.subscriptionTierId || null
+      limitedOffers = probe?.limitedOffers || []
+      limitedOfferReason = probe?.limitedOfferReason || null
       extraIds = probe?.ids || []
     } catch (err) {
       logger.warn('models: session probe failed; returning static catalog', {
@@ -274,6 +337,9 @@ export function createProxyHandler(ctx) {
       200,
       buildModelsListResponse({
         accessTier,
+        subscriptionTierId,
+        limitedOffers,
+        limitedOfferReason,
         extraIds,
         includeAllCatalog: true,
         customModels: customModels(),
