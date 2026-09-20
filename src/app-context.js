@@ -511,7 +511,10 @@ export class AccountRuntimes {
     return listAccounts(this.dir).map((a) => a.key)
   }
 
-  /** 当前明确启用、允许参与自动调度的账号 key。老凭据缺字段时默认启用。 */
+  /**
+   * 当前明确启用、允许参与自动调度的账号 key。老凭据缺字段时默认启用。
+   * 设计约束见 .agents/notes/implemented/feature/2026-09-20-manual-account-enable-disable.md
+   */
   enabledKeys() {
     return listAccounts(this.dir)
       .filter((a) => a.enabled !== false)
