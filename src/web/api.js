@@ -752,6 +752,18 @@ export function createWebApi(deps) {
       // 不创建 session、不占免费额度；fresh 账号若上游无使用记录则额度仍为空。
       const results = []
       for (const a of runtimes.list()) {
+        // 手工停用 = 不做任何自动/批量上游访问。需要诊断时仍可点该账号行内
+        // 「检测」走单账号显式探测；这能保证“停用”真的意味着静默退出常规使用。
+        if (a.enabled === false) {
+          results.push({
+            key: a.key,
+            email: a.email,
+            ok: true,
+            skipped: true,
+            code: 'disabled',
+          })
+          continue
+        }
         try {
           const rt = runtimes.get(a.key)
           const session = await rt.sessions.refresh()
@@ -796,6 +808,16 @@ export function createWebApi(deps) {
     if (method === 'POST' && route === '/api/accounts/refresh') {
       const results = []
       for (const row of runtimes.list()) {
+        if (row.enabled === false) {
+          results.push({
+            key: row.key,
+            email: row.email,
+            ok: true,
+            skipped: true,
+            code: 'disabled',
+          })
+          continue
+        }
         try {
           const rt = runtimes.get(row.key)
           const session = await rt.sessions.refresh()
