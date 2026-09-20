@@ -1783,6 +1783,21 @@ export function buildAppContext(config, opts = {}) {
       sessions: null,
     }
   }
+  // 允许“账号都被手工停用”作为一种正常控制面状态：服务必须继续启动，
+  // 用户才能打开 Web 控制台重新启用账号。不能让 getAny() 在这里把整个进程打死。
+  if (!runtimes.enabledKeys().length) {
+    return {
+      config,
+      dir: runtimes.dir,
+      runtimes,
+      authToken: null,
+      authSource: null,
+      authEmail: null,
+      authKey: null,
+      upstream: null,
+      sessions: null,
+    }
+  }
   const current = runtimes.getAny()
   return {
     config,
