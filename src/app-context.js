@@ -297,16 +297,17 @@ export class AccountRuntimes {
       const chatLock = this.chatLocks.get(a.key)
       // 账本记录（生命周期/时间轴）：account() 会按需创建并盖上导入时间。
       const rec = this.accountState.account(a.key, this._importedAtHint(a.key))
+      const enabled = a.enabled !== false
       return {
         ...a,
+        enabled,
         lastUsed: this._lastSuccessKey === a.key,
-        // available 保持原语义（无账号级冷却）不动，避免改动既有消费者；
-        // banned / unavailable 是新增的**更细粒度**分档，控制台按它们区分
-        // "封禁"与"暂时被拒"，API 侧仍可只看 available。
-        available: !cooling,
+        // 手工停用是最高优先级的本地调度闸门：它不等于封禁/冷却，
+        // 但 available 必须为 false，避免 API 消费者误以为仍会参与选号。
+        available: enabled && !cooling,
         banned,
-        unavailable,
-        status: banned ? 'banned' : unavailable ? 'unavailable' : 'ok',
+        unavailable: !enabled || unavailable,
+        status: !enabled ? 'disabled' : banned ? 'banned' : unavailable ? 'unavailable' : 'ok',
         cooldownUntil: cooling ? new Date(cd.until).toISOString() : null,
         cooldownCode: cooling ? cd.code : null,
         requests: this.stats.byKey.get(a.key) || 0,
@@ -398,7 +399,8 @@ export class AccountRuntimes {
     if (
       existing &&
       existing.authToken === user.authToken &&
-      existing.proxy === (user.proxy || null)
+      existing.proxy === (user.proxy || null) &&
+      existing.enabled === (user.enabled !== false)
     ) {
       return existing
     }
@@ -435,6 +437,7 @@ export class AccountRuntimes {
       email: user.email,
       authToken: user.authToken,
       proxy: user.proxy || null,
+      enabled: user.enabled !== false,
       /** 实际生效的出网代理（全局池分配 / 账号覆盖 / env） */
       effectiveProxy: upstream.proxyUrl || null,
       user,
@@ -506,6 +509,19 @@ export class AccountRuntimes {
   /** 账号 key 列表（id 优先，历史账号为邮箱）。 */
   allKeys() {
     return listAccounts(this.dir).map((a) => a.key)
+  }
+
+  /** 当前明确启用、允许参与自动调度的账号 key。老凭据缺字段时默认启用。 */
+  enabledKeys() {
+    return listAccounts(this.dir)
+      .filter((a) => a.enabled !== false)
+      .map((a) => a.key)
+  }
+
+  /** 单账号是否允许被自动调度；管理端仍可 get()/probe 已停用账号。 */
+  isEnabled(key) {
+    const user = readAccountUser(this.dir, key)
+    return Boolean(user && user.enabled !== false)
   }
 
   /** 每个账号的当前并发上限（控制台设置，实时生效）。 */
@@ -782,7 +798,7 @@ export class AccountRuntimes {
    *   账号，不再重复选中（否则会一直排在第一位反复等）。
    */
   candidateKeys(model, opts = {}) {
-    const keys = this.allKeys()
+    const keys = this.enabledKeys()
     if (!keys.length) return []
     const skip = opts.skipKeys instanceof Set ? opts.skipKeys : null
     const start = this._rr % keys.length
@@ -929,11 +945,18 @@ export class AccountRuntimes {
     }
 
     const rows = listAccounts(this.dir)
-    const keys = rows.map((r) => r.key)
-    if (!keys.length) {
+    if (!rows.length) {
       throw new UpstreamError(
         'No Freebuff accounts. Add one via the web console (账号管理 → 添加账号) or run `npm run login`.',
         { status: 401, code: 'upstream_auth_missing' },
+      )
+    }
+    const enabledRows = rows.filter((r) => r.enabled !== false)
+    const keys = enabledRows.map((r) => r.key)
+    if (!keys.length) {
+      throw new UpstreamError(
+        'All Freebuff accounts are manually disabled. Enable at least one account in the web console.',
+        { status: 429, code: 'no_enabled_account' },
       )
     }
     const emailByKey = new Map(rows.map((r) => [r.key, r.email]))
@@ -1164,6 +1187,11 @@ export class AccountRuntimes {
   }
 
   async _reacquireAfterGateUnlocked(model, opts = {}) {
+    // 用户可能在请求执行期间手工停用当前账号。此时允许当前在途流收尾，
+    // 但任何重试/重新 admit 都必须绕开它，转去新的启用账号。
+    if (opts.preferredKey && !this.isEnabled(opts.preferredKey)) {
+      return this._acquireForModelUnlocked(model, opts)
+    }
     if (opts.preferredKey) {
       if (
         opts.switchAccount ||
@@ -1302,14 +1330,24 @@ export class AccountRuntimes {
 
   /** Any account for status/doctor (not used for chat selection). */
   getAny() {
-    const keys = this.allKeys()
-    if (!keys.length) {
+    const all = this.allKeys()
+    if (!all.length) {
       throw new UpstreamError(
         'No Freebuff accounts. Run `npm run login` (saves credentials/<key>.json).',
         { status: 401, code: 'upstream_auth_missing' },
       )
     }
-    const preferred = this._lastSuccessKey || keys[0]
+    const keys = this.enabledKeys()
+    if (!keys.length) {
+      throw new UpstreamError(
+        'All Freebuff accounts are manually disabled.',
+        { status: 429, code: 'no_enabled_account' },
+      )
+    }
+    const preferred =
+      this._lastSuccessKey && keys.includes(this._lastSuccessKey)
+        ? this._lastSuccessKey
+        : keys[0]
     return this.get(preferred)
   }
 
