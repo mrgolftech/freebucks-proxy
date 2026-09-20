@@ -52,7 +52,8 @@ import {
   restoreToolNamesInResponse,
   rewriteToolNamesForUpstream,
 } from './tool-mapper.js'
-import { logger } from './util/log.js'\nimport { validateStrictToolsRequest } from './strict-tools.js'
+import { logger } from './util/log.js'
+import { validateStrictToolsRequest } from './strict-tools.js'
 
 /**
  * OpenAI-compatible surface under /v1 only.
