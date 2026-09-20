@@ -83,33 +83,60 @@ export function createProxyHandler(ctx) {
   /**
    * 上游会话探测的轻量缓存（60s）：白名单校验用它判断"上游会话实际出现过
    * 哪些模型"，避免每次 chat 请求都实时打上游。探测失败不影响主流程。
-   * @type {{ ids: string[], model: string | null, at: number } | null}
+   *
+   * 注意多账号：Web 控制面的 fresh 刷新会把每个启用账号的 quota/freebucks
+   * 写进共享 runtimes；这里每次都先合并这些**本地已知快照**，再只对 getAny()
+   * 做一次实时 GET。这样不会为了 /v1/models 每 60s 对整个账号池制造一轮网络
+   * 探测，同时又能立刻吸收 Web fresh 得到的多账号价格表并集。
+   * @type {{ ids: string[], model: string | null, accessTier: string | null, at: number } | null}
    */
   let sessionProbeCache = null
   const SESSION_PROBE_CACHE_MS = 60_000
 
+  function runtimeKnownModelIds() {
+    const ids = new Set()
+    for (const row of runtimes.list()) {
+      if (row.enabled === false) continue
+      if (typeof row.session?.model === 'string') ids.add(row.session.model)
+      for (const id of Object.keys(row.quota?.byModel || {})) ids.add(id)
+      for (const [id, rawPrice] of Object.entries(row.freebucks?.prices || {})) {
+        if (Number.isFinite(Number(rawPrice))) ids.add(id)
+      }
+    }
+    return ids
+  }
+
   async function probeUpstreamSessionCached() {
     const now = Date.now()
+    const known = runtimeKnownModelIds()
     if (
       sessionProbeCache &&
       now - sessionProbeCache.at < SESSION_PROBE_CACHE_MS
     ) {
+      for (const id of known) {
+        if (!sessionProbeCache.ids.includes(id)) sessionProbeCache.ids.push(id)
+      }
       return sessionProbeCache
     }
+    const ids = known
+    let model = null
+    let accessTier = null
     try {
       const rt = runtimes.getAny()
       const session = await rt.upstream.freebuffSession('GET')
-      sessionProbeCache = {
-        ids: modelIdsFromSession(session),
-        model:
-          session && typeof session === 'object' && typeof session.model === 'string'
-            ? session.model
-            : null,
-        at: now,
-      }
+      for (const id of modelIdsFromSession(session)) ids.add(id)
+      model =
+        session && typeof session === 'object' && typeof session.model === 'string'
+          ? session.model
+          : null
+      accessTier =
+        session?.accessTier === 'full' || session?.accessTier === 'limited'
+          ? session.accessTier
+          : null
     } catch {
-      sessionProbeCache = { ids: [], model: null, at: now }
+      // fail-open 到本地已知快照：控制面刚 fresh 过时仍能保留完整目录。
     }
+    sessionProbeCache = { ids: [...ids], model, accessTier, at: now }
     return sessionProbeCache
   }
 
@@ -231,14 +258,12 @@ export function createProxyHandler(ctx) {
     /** @type {string[]} */
     let extraIds = []
     try {
-      const rt = runtimes.getAny()
-      const session = await rt.upstream.freebuffSession('GET')
-      if (session && typeof session === 'object') {
-        if (session.accessTier === 'full' || session.accessTier === 'limited') {
-          accessTier = session.accessTier
-        }
-        extraIds = modelIdsFromSession(session)
-      }
+      const probe = await probeUpstreamSessionCached()
+      accessTier =
+        probe?.accessTier === 'full' || probe?.accessTier === 'limited'
+          ? probe.accessTier
+          : null
+      extraIds = probe?.ids || []
     } catch (err) {
       logger.warn('models: session probe failed; returning static catalog', {
         error: err instanceof Error ? err.message : String(err),
