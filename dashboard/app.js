@@ -88,6 +88,9 @@ const ICONS = {
   lock: '<rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>',
   gauge: '<path d="M12 15l3.5-3.5"/><path d="M20.3 18a10 10 0 1 0-16.6 0"/>',
   github: '<path d="M15 22v-4a4.8 4.8 0 0 0-1-3.5c3 0 6-2 6-5.5.08-1.25-.27-2.48-1-3.5.28-1.15.28-2.35 0-3.5 0 0-1 0-3 1.5-2.64-.5-5.36-.5-8 0C6 2 5 2 5 2c-.3 1.15-.3 2.35 0 3.5A5.403 5.403 0 0 0 4 9c0 3.5 3 5.5 6 5.5-.39.49-.68 1.05-.85 1.65-.17.6-.22 1.23-.15 1.85v4"/><path d="M9 18c-4.51 2-5-2-7-2"/>',
+  sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/>',
+  moon: '<path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>',
+  power: '<path d="M18.36 6.64a9 9 0 1 1-12.73 0"/><line x1="12" y1="2" x2="12" y2="12"/>',
 }
 function icon(name, size = 16) {
   const paths = ICONS[name] || ICONS.bolt
@@ -120,6 +123,41 @@ function normalizeSvgPaths(paths) {
     'g',
   )
   return String(paths).replace(re, '<$1$2 />')
+}
+
+/* ---------------- theme ---------------- */
+function currentTheme() {
+  return document.documentElement.dataset.theme === 'light' ? 'light' : 'dark'
+}
+
+function applyTheme(theme, { persist = true } = {}) {
+  const next = theme === 'light' ? 'light' : 'dark'
+  document.documentElement.dataset.theme = next
+  document.querySelector('meta[name="theme-color"]')
+    ?.setAttribute('content', next === 'light' ? '#f5f7fb' : '#0b0e14')
+  if (persist) {
+    try { localStorage.setItem('fb-theme', next) } catch { /* ignore */ }
+  }
+  return next
+}
+
+function themeToggleButton(extraClass = '') {
+  const btn = el('button', {
+    class: `icon theme-toggle ${extraClass}`.trim(),
+    type: 'button',
+  })
+  const sync = () => {
+    const light = currentTheme() === 'light'
+    btn.replaceChildren(icon(light ? 'moon' : 'sun', 15))
+    btn.title = light ? '切换到暗色主题' : '切换到亮色主题'
+    btn.setAttribute('aria-label', btn.title)
+  }
+  btn.addEventListener('click', () => {
+    applyTheme(currentTheme() === 'light' ? 'dark' : 'light')
+    sync()
+  })
+  sync()
+  return btn
 }
 
 /* ---------------- api ---------------- */
@@ -222,6 +260,7 @@ async function render() {
 
 function renderLogin() {
   const wrap = el('div', { class: 'login-wrap' }, [
+    el('div', { class: 'login-theme' }, themeToggleButton()),
     el('div', { class: 'brand' }, [icon('bolt', 22), 'Freebuff Proxy', versionBadge()]),
     el('div', { class: 'card' }, [
       el('label', {}, '用户名'),
@@ -273,6 +312,7 @@ function renderHeader() {
   return el('header', {}, [
     el('h1', {}, [icon('bolt', 18), 'Freebuff Proxy', versionBadge()]),
     el('div', { class: 'spacer' }),
+    themeToggleButton(),
     el('span', { class: 'muted', style: 'display:inline-flex;align-items:center;gap:6px' }, [
       icon('user', 14),
       state.me.username,
@@ -542,7 +582,8 @@ function renderOverviewHeader(data) {
   return el('div', { class: 'row spread', style: 'margin-bottom:16px' }, [
     el('div', {}, [
       el('h2', { style: 'margin:0 0 4px' }, `账号池（${data.accountCount}）`),
-      el('span', { class: 'muted' }, `上游 ${data.upstream.apiBase} · 模型 ${data.models} · 数据目录 ${data.dataDir}`),
+      el('span', { class: 'muted' },
+        `已启用 ${data.accounts.filter((a) => a.enabled !== false).length} · 上游 ${data.upstream.apiBase} · 模型 ${data.models} · 数据目录 ${data.dataDir}`),
     ]),
     el('div', { class: 'row' }, [
       // 主操作 = 一键刷新：额度 + 账号状态 + 上游模型目录，一次全刷（只读）。
@@ -563,11 +604,14 @@ function renderOverviewHeader(data) {
 /** 统计卡片 */
 function renderStatCards(data) {
   const total = data.accounts.length
-  // 可用 = 无账号级冷却 **且** 未封禁。以前只看 available，会把已封禁的号
-  // 算进"可用账号"里（banned 冷却 24h 到期后 available 又会变回 true）。
+  const enabled = data.accounts.filter((a) => a.enabled !== false).length
+  const disabled = total - enabled
+  // 可用 = 已启用 + 无账号级冷却 **且** 未封禁。
   const banned = data.accounts.filter((a) => a.banned === true || a.bannedAt).length
   const available = data.accounts.filter((a) => a.available && !(a.banned === true || a.bannedAt)).length
-  const cooldown = data.accounts.filter((a) => a.cooldownUntil && !a.banned).length
+  const cooldown = data.accounts.filter(
+    (a) => a.enabled !== false && a.cooldownUntil && !a.banned,
+  ).length
   const inFlight = data.accounts.reduce((n, a) => n + (a.inFlight || 0), 0)
   // 全局闸门占用：inFlight 贴着 limit 不动就是槽位泄漏（服务会"看着在跑
   // 却不接单"）。排队数 >0 说明已经在限流。
@@ -582,7 +626,11 @@ function renderStatCards(data) {
     admits + reuses > 0 ? Math.round((reuses / (admits + reuses)) * 100) : null
   const cards = [
     { label: '账号总数', value: total, cls: '' },
-    { label: '可用账号', value: available, cls: 'green' },
+    { label: '已启用', value: enabled, cls: enabled ? 'green' : 'yellow',
+      tip: '只有启用账号会参与自动选号和新会话创建。' },
+    { label: '手工停用', value: disabled, cls: disabled ? 'yellow' : 'green',
+      tip: '停用账号保留凭据/历史/代理配置，但不会参与自动调度。' },
+    { label: '可调度', value: available, cls: available ? 'green' : 'yellow' },
     { label: '已封禁', value: banned, cls: banned ? 'red' : 'green',
       tip: '上游封禁 = 不可恢复，只能换号或等平台解封。与"冷却中"（限流/额度，到期自愈）区分开。' },
     { label: '冷却中', value: cooldown, cls: cooldown ? 'yellow' : 'green',
@@ -631,7 +679,9 @@ async function renderAccountsCard(data) {
   const head = el('div', { class: 'row spread' }, [
     el('div', {}, [
       el('h3', { style: 'margin:0 0 2px' }, '账号池'),
-      el('span', { class: 'muted' }, totalReq > 0 ? `负载均衡 · 共 ${totalReq} 次选号 · 热 session 优先复用` : '尚无请求记录'),
+      el('span', { class: 'muted' },
+        `启用 ${data.accounts.filter((a) => a.enabled !== false).length}/${data.accounts.length}` +
+        (totalReq > 0 ? ` · 共 ${totalReq} 次选号 · 热 session 优先复用` : ' · 尚无请求记录')),
     ]),
     el('div', { class: 'row', style: 'gap:6px' }, [
       el('button', { class: 'primary', onclick: (e) => oneClickRefresh(e.currentTarget) },
@@ -673,6 +723,7 @@ async function renderAccountsCard(data) {
  */
 const ACCOUNT_SECTIONS = [
   { id: 'banned', label: '已被封禁', hint: '上游已封号，不会再被调度', tone: 'err' },
+  { id: 'disabled', label: '手工停用', hint: '保留账号但不参与自动调度，可随时重新启用', tone: 'idle' },
   { id: 'exhausted', label: '额度不足', hint: 'Freebucks 买不起当前模型，等池子刷新或加号', tone: 'err' },
   { id: 'warning', label: '出现警告', hint: '限流 / 风控 / 探测失败，但还没封号', tone: 'warn' },
   { id: 'lowbalance', label: '低额度', hint: '余额已接近见底——仍会被正常调度，只是提前提醒你该补号了', tone: 'warn' },
@@ -713,6 +764,7 @@ function classifyAccount(a) {
   // 1) 封禁：探测明确 banned、账本记过 bannedAt、或后端已判 banned。
   //    注意 CDN 兜底：country_blocked 是出口风控，不是账号封禁，刻意不归这里。
   if (a.banned === true || a.bannedAt || code.includes('banned')) return 'banned'
+  if (a.enabled === false) return 'disabled'
   // 2) 额度不足：**与后端的两道闸门严格对齐**——
   //    ① Freebucks：今日池跑完（daily.remaining <= 0，且 limit > 0 才算真有池子）
   //       或余额买不起当前模型（balance < 单价）；
@@ -783,7 +835,7 @@ function sectionOpen(section) {
 function buildAccountSection(section, rows) {
   const table = el('div', { class: 'table-wrap' }, [
     el('table', {}, [
-      el('thead', {}, el('tr', {}, ['账号', '状态', 'Session', '并发', '时间轴（导入/更新/调度）', '额度（今日 · FB/h）', 'Freebucks', '请求', '冷却', '出口', '操作'].map((t) => el('th', {}, t)))),
+      el('thead', {}, el('tr', {}, ['账号', '启用', '状态', 'Session', '并发', '时间轴（导入/更新/调度）', '额度（今日 · FB/h）', 'Freebucks', '请求', '冷却', '出口', '操作'].map((t) => el('th', {}, t)))),
       el('tbody', {}, rows.map((a, i) => buildAccountRow(a, i))),
     ]),
   ])
@@ -890,18 +942,23 @@ function buildAccountRow(a, i) {
    * 判定优先用后端给的 banned/unavailable 字段（与调度器同一套 code），
    * 老版本后端没有这两个字段时按 available 兜底，不会崩。
    */
+  const enabled = a.enabled !== false
   const banned = a.banned === true || Boolean(a.bannedAt)
-  const unavailable = banned || a.unavailable === true || a.available === false
-  const statusDot = el('span', { class: banned ? 'status-dot err' : unavailable ? 'status-dot warn' : 'status-dot ok' })
-  let statusLabel = banned ? '已封禁' : unavailable ? (cd ? `冷却至 ${cd}` : '不可用') : '可用'
+  const unavailable = !enabled || banned || a.unavailable === true || a.available === false
+  const statusDot = el('span', {
+    class: banned ? 'status-dot err' : !enabled ? 'status-dot idle' : unavailable ? 'status-dot warn' : 'status-dot ok',
+  })
+  let statusLabel = banned ? '已封禁' : !enabled ? '已停用' : unavailable ? (cd ? `冷却至 ${cd}` : '不可用') : '可用'
   let statusTip = banned
     ? '上游已封禁该账号（不可自行恢复，只能换号或等平台解封）'
-    : unavailable
-      ? '上游暂时拒付/限流（冷却到期自动恢复；会话句柄保留，已购时段不受影响）'
-      : '正常：可参与调度'
-  let statusCls = banned ? 'badge err' : unavailable ? 'badge warn' : 'badge ok'
+    : !enabled
+      ? '已被手工停用：不会参与自动选号或创建新会话；凭据、代理与历史数据仍保留。'
+      : unavailable
+        ? '上游暂时拒付/限流（冷却到期自动恢复；会话句柄保留，已购时段不受影响）'
+        : '正常：可参与调度'
+  let statusCls = banned ? 'badge err' : !enabled ? 'badge' : unavailable ? 'badge warn' : 'badge ok'
   // 探测失败的**具体原因**比笼统的"不可用"更有信息量，覆盖之（但 ban 优先级最高）。
-  if (!banned && probe) {
+  if (enabled && !banned && probe) {
     statusLabel = probe.label
     statusTip = probe.tip
     statusCls = 'badge err'
@@ -922,12 +979,16 @@ function buildAccountRow(a, i) {
       ? el('button', { class: 'icon danger', title: '删除账号', onclick: () => removeAccount(a.key, a.email) }, icon('trash', 14))
       : null,
   ])
-  return el('tr', { class: 'row-in', style: `animation-delay:${Math.min(i * 40, 400)}ms` }, [
+  return el('tr', {
+    class: `row-in${enabled ? '' : ' account-disabled'}`,
+    style: `animation-delay:${Math.min(i * 40, 400)}ms`,
+  }, [
     el('td', {}, [
       a.email,
       a.id && a.id !== a.email ? el('div', { class: 'muted', style: 'font-size:11px' }, `ID ${a.id}`) : '',
       a.lastUsed ? el('span', { class: 'badge ok', style: 'margin-left:6px' }, '最近使用') : '',
     ]),
+    el('td', {}, accountEnabledControl(a)),
     el('td', {}, statusBadge),
     el('td', { class: 'mono', style: 'font-size:12px' }, sess),
     el('td', { class: 'mono' }, `${a.inFlight || 0}/${a.concurrency || 1}`),
@@ -939,6 +1000,48 @@ function buildAccountRow(a, i) {
     el('td', {}, accountProxyCell(a)),
     el('td', {}, ops),
   ])
+}
+
+function accountEnabledControl(a) {
+  const enabled = a.enabled !== false
+  if (state.me.role !== 'admin') {
+    return el('span', { class: enabled ? 'badge ok' : 'badge' }, enabled ? '启用' : '停用')
+  }
+  const input = el('input', {
+    type: 'checkbox',
+    class: 'switch-input',
+    ...(enabled ? { checked: 'checked' } : {}),
+    'aria-label': enabled ? `停用 ${a.email}` : `启用 ${a.email}`,
+  })
+  const label = el('label', {
+    class: 'switch account-enable-switch',
+    title: enabled
+      ? '关闭后立即停止该账号的新调度；当前在途回复完成后会释放会话'
+      : '开启后该账号重新进入自动调度候选池',
+  }, [
+    input,
+    el('span', { class: 'switch-track' }),
+    el('span', { class: 'switch-status' }, enabled ? '启用' : '停用'),
+  ])
+  input.addEventListener('change', async () => {
+    const next = input.checked
+    input.disabled = true
+    try {
+      await api(`/api/accounts/${encodeURIComponent(a.key)}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ enabled: next }),
+      })
+      toast(next
+        ? `已启用 ${a.email}，可参与后续调度`
+        : `已停用 ${a.email}，新请求不会再选中该账号`)
+      await refreshAccountsCard()
+    } catch (err) {
+      input.checked = !next
+      input.disabled = false
+      toast(err.message, true)
+    }
+  })
+  return label
 }
 
 /**

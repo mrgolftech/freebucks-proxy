@@ -450,11 +450,15 @@ export function createProxyHandler(ctx) {
     sendJson(res, 200, { ok: true, object: 'delete', removed, total: removed.length })
   }
 
-  async function handleStatus(res) {    const accounts = runtimes.list()
+  async function handleStatus(res) {
+    const accounts = runtimes.list()
+    const enabledAccounts = accounts.filter((a) => a.enabled !== false)
     let me = null
     let session = null
     let account = null
-    if (accounts.length) {
+    // “有凭据但全部手工停用”是合法维护状态：状态接口仍应 200，
+    // 只是不选当前账号、不主动访问上游。
+    if (enabledAccounts.length) {
       const rt = runtimes.getAny()
       account = rt.email
       try {

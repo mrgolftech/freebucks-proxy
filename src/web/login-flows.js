@@ -236,6 +236,8 @@ export class LoginFlowManager {
             fingerprintId: flow.fingerprintId,
             fingerprintHash: flow.fingerprintHash,
             proxy: flow.proxy || existing?.proxy || st.user.proxy || null,
+            // 重新登录只刷新凭据/指纹，不应把用户手工停用的账号偷偷重新启用。
+            enabled: existing?.enabled !== false,
           })
           // 记「凭证更新时间」：浏览器登录回调也是写凭据的入口之一。
           try {
