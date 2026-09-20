@@ -163,6 +163,9 @@ function themeToggleButton(extraClass = '') {
 /* ---------------- api ---------------- */
 async function api(path, opts = {}) {
   const res = await fetch(path, {
+    // 控制台 API 都是运行时状态，不应该吃浏览器缓存；尤其代理池/账号状态
+    // 需要每次打开弹窗都看到最新值。
+    cache: 'no-store',
     headers: { 'content-type': 'application/json', ...(opts.headers || {}) },
     ...opts,
   })
@@ -1290,18 +1293,20 @@ async function renderFlowsCard(view) {
 
 /* ---------------- proxy settings ---------------- */
 async function renderProxySettings(view) {
-  let data = null
-  let settings = null
+  let data = { proxies: state.proxies, effective: [], accounts: [] }
+  let settings = { freeToolSignatureEnabled: true }
+  // 两个控制面接口必须独立失败：settings 临时异常不能把已经读到的代理池清空。
   try {
-    ;[data, settings] = await Promise.all([
-      api('/api/proxy'),
-      api('/api/settings'),
-    ])
+    data = await api('/api/proxy')
   } catch {
-    data = { proxies: [], effective: [], accounts: [] }
-    settings = { freeToolSignatureEnabled: true }
+    // 保留上一轮成功读取的 state.proxies，避免 UI 瞬时显示“代理池为空”。
   }
-  state.proxies = data.proxies || []
+  try {
+    settings = await api('/api/settings')
+  } catch {
+    // 设置读取失败只回退设置默认值，不影响代理数据。
+  }
+  if (Array.isArray(data.proxies)) state.proxies = data.proxies
   // 「空闲释放推荐值」要按账号池实时算（活跃模型/账号比），而 /api/proxy 只回
   // 代理信息、不含 session.model。这里单独拉一次 overview 填充 state.accounts。
   // 独立 try：overview 挂了也不能把上面的 settings 一起拖垮（否则整页回落到默认值）。
@@ -1809,6 +1814,7 @@ async function saveProxyPool() {
   const proxies = textarea.value.split('\n').map((x) => x.trim()).filter(Boolean)
   try {
     const r = await api('/api/proxy', { method: 'POST', body: JSON.stringify({ proxies }) })
+    if (Array.isArray(r.proxies)) state.proxies = r.proxies
     toast(r.note || '已保存')
     // 局部刷新「当前生效代理」文字，不重建页面
     try {
@@ -2796,6 +2802,27 @@ function shortProxy(proxy) {
   return m.split('@').pop() || proxy
 }
 
+/**
+ * 新账号可选代理不能只看全局 pool：
+ * - proxies: 控制台保存的全局代理池
+ * - effective: config upstream.proxy / env proxy 等当前实际生效出口
+ * - accounts.*Proxy: 已有账号明确绑定或当前实际使用的出口
+ * - fallback: 页面上一轮成功读取到的代理，防止一次瞬时 GET 失败就把列表假装成空
+ *
+ * 见 Agent Note:
+ * .agents/notes/implemented/bug-fix/2026-09-20-account-login-proxy-list.md
+ */
+function collectAvailableProxies(pdata, fallback = []) {
+  const rows = Array.isArray(pdata?.accounts) ? pdata.accounts : []
+  const all = [
+    ...(Array.isArray(pdata?.proxies) ? pdata.proxies : []),
+    ...(Array.isArray(pdata?.effective) ? pdata.effective : []),
+    ...rows.flatMap((a) => [a?.proxy, a?.effectiveProxy]),
+    ...(Array.isArray(fallback) ? fallback : []),
+  ]
+  return [...new Set(all.filter((p) => typeof p === 'string' && p.trim()).map((p) => p.trim()))]
+}
+
 /* ---------------- add account (login flow) ---------------- */
 async function openAddAccount() {
   const backdrop = el('div', { class: 'modal-backdrop' })
@@ -2810,19 +2837,23 @@ async function openAddAccount() {
   document.body.append(backdrop)
   backdrop.addEventListener('click', (e) => { if (e.target === backdrop) backdrop.remove() })
 
-  let pdata = { proxies: [], accounts: [] }
+  let pdata = null
+  let proxyReadError = null
   try {
     pdata = await api('/api/proxy')
-  } catch {
-    // 代理列表读取失败不阻止登录；按“未绑定”继续。
+  } catch (err) {
+    // 不再把瞬时读取失败静默伪装成“没有代理”。
+    // 如果页面此前成功读过代理池，仍允许用户用缓存继续操作。
+    proxyReadError = err
   }
-  const proxies = Array.isArray(pdata.proxies) ? pdata.proxies : []
-  state.proxies = proxies
+  const proxies = collectAvailableProxies(pdata, state.proxies)
+  if (pdata) state.proxies = proxies
 
   // 默认选“当前绑定账号最少”的代理，让新增账号自然摊开，同时仍是显式绑定，
   // 而不是只依赖全局池哈希 + 故障回落。
+  const accounts = Array.isArray(pdata?.accounts) ? pdata.accounts : state.accounts
   const counts = new Map(proxies.map((p) => [p, 0]))
-  for (const a of Array.isArray(pdata.accounts) ? pdata.accounts : []) {
+  for (const a of Array.isArray(accounts) ? accounts : []) {
     if (a.proxy && counts.has(a.proxy)) counts.set(a.proxy, counts.get(a.proxy) + 1)
   }
   const recommended = proxies
@@ -2838,10 +2869,19 @@ async function openAddAccount() {
   ])
   if (recommended) select.value = recommended
 
-  const status = el('p', { id: 'login-create-status', class: 'muted', style: 'margin-top:10px' },
-    recommended
+  const statusText = proxyReadError
+    ? proxies.length
+      ? `实时读取代理失败（${proxyReadError.message}），已使用上一次成功读取的 ${proxies.length} 个代理。可继续登录，或重试刷新。`
+      : `读取代理失败：${proxyReadError.message}。请重试读取，避免在未知出口状态下新增账号。`
+    : recommended
       ? `推荐：${shortProxy(recommended)}（当前绑定账号最少）。登录 code/status 与后续请求会固定走这个出口。`
-      : '当前没有代理池；可先在“代理设置”添加代理，或继续按现有全局/环境/直连策略登录。')
+      : '当前没有可用代理；可先在“代理设置”添加代理，或继续按现有全局/环境/直连策略登录。'
+
+  const status = el('p', {
+    id: 'login-create-status',
+    class: proxyReadError ? 'muted warn-text' : 'muted',
+    style: 'margin-top:10px',
+  }, statusText)
 
   body.append(
     el('h3', {}, '添加 Freebuff 账号（浏览器登录）'),
@@ -2853,7 +2893,15 @@ async function openAddAccount() {
     el('p', { class: 'muted', style: 'font-size:12px' },
       '设备 ID：本次登录流程会使用独立且固定的 fingerprintId；同一流程不会变化，不再让同一容器中新账号天然共用完全相同的主机指纹。'),
     el('div', { class: 'row', style: 'margin-top:12px' }, [
-      el('button', { class: 'primary', onclick: async (e) => {
+      proxyReadError
+        ? el('button', {
+            onclick: () => {
+              backdrop.remove()
+              openAddAccount()
+            },
+          }, [icon('refresh', 14), '重试读取代理'])
+        : null,
+      el('button', { class: 'primary', disabled: proxyReadError && !proxies.length ? '' : false, onclick: async (e) => {
         const restore = withButtonLoading(e.currentTarget, '生成中')
         try {
           const proxy = select.value || null
