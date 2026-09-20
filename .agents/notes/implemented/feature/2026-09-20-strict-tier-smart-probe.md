@@ -87,6 +87,23 @@ SessionManager 新增 `entitlements` 快照，保存：
 - 模型管理同时读取 `/api/models` 的 entitlement-aware 目录与 `/api/models/upstream` 的实时价格/额度，不在前端重新推导准入规则；
 - smart probe 不提供关闭开关，只展示它刷新后的授权/额度结果，避免用户关闭后重新使用陈旧 quota。
 
+### 5. 按模型记忆有期限的 429
+
+继续迁移 trefeon #624 已验证的 refusal-memory 语义：
+
+- admission / run-start / chat 返回 `rate_limited` 且携带明确
+  `Retry-After / retryAfterMs / future resetAt` 时，把拒绝窗口记在
+  `account + model`，下次同模型选号直接跳过该 lane，不再碰上游；
+- 同一账号的其他模型不受影响，账号本身仍显示可用；
+- 过期后现有 cooldown prune 自动恢复；
+- opaque 429（没有任何可用过期信号）不写长期 cooldown。当前请求通过
+  `skipKeys` 绕开该账号完成 failover；后续新请求允许 live re-attempt；
+- 没有 model 上下文的 rate_limited 继续保留原来的账号级 cooldown；
+- 账号表显示“模型冷却 N”，悬停可看到具体模型与恢复时间。
+
+实现复用已有的持久化 `cooldowns`（key 形态 `account\\0model`），没有新增
+第二套 refusal store。
+
 ## Alternatives considered
 
 - **把 strict 校验塞进 ToolMapper** — 拒绝。名字虚拟化与 schema 契约是两个独立
@@ -118,5 +135,7 @@ SessionManager 新增 `entitlements` 快照，保存：
 - withdrawn + replacement；
 - smart probe 必须 session-less，且不能覆盖 live `instanceId`；
 - smart probe 更新 quota/freebucks/entitlements；
+- 带过期窗口的 429 只冷却 account+model，其他模型仍可用；
+- opaque 429 不持久化，账号级 rate_limited 语义保持兼容；
 - `claimableGrantFreebucks` 参与可支付余额；
 - deprecated monthly 快照不再误拦当前报价允许的 admission。
