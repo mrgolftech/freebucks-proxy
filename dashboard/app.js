@@ -920,6 +920,7 @@ function accountEntitlementCell(a) {
     Number(o?.remaining || 0) > 0 && Number(o?.userRemaining || o?.user_remaining || 0) > 0,
   )
   const lastProbeAt = a.lastProbe?.at || null
+  const modelCooldowns = Array.isArray(a.modelCooldowns) ? a.modelCooldowns : []
   const tierLabel = tier === 'full' ? 'Full' : tier === 'limited' ? 'Limited' : tier === 'free' ? 'Free' : '未知'
   const tierCls = tier === 'limited' ? 'badge warn' : tier ? 'badge ok' : 'badge'
   const details = [
@@ -928,13 +929,19 @@ function accountEntitlementCell(a) {
     offers.length ? 'Limited offers: ' + offers.length + '（当前可加入 ' + joinable.length + '）' : 'Limited offers: 无/未报告',
     ent.limitedOfferReason ? 'Offer reason: ' + ent.limitedOfferReason : null,
     lastProbeAt ? '最近只读探测: ' + new Date(lastProbeAt).toLocaleString() : '最近只读探测: 无',
-    '额度状态会由后端 smart probe 按请求活动、resetAt 和限流退避自动刷新。',
+    modelCooldowns.length
+      ? '模型级限流: ' + modelCooldowns.map((x) => x.model + ' → ' + fmtTime(x.until)).join('；')
+      : '模型级限流: 无',
+    '模型级 429 只阻止对应模型；其他模型仍可使用该账号。',
   ].filter(Boolean).join('\n')
   return el('div', { style: 'min-width:110px', title: details }, [
     el('div', { class: 'row', style: 'gap:4px;flex-wrap:wrap' }, [
       el('span', { class: tierCls }, tierLabel),
       sub ? el('span', { class: 'badge ok' }, sub) : null,
       offers.length ? el('span', { class: joinable.length ? 'badge ok' : 'badge warn' }, 'Offer ' + joinable.length + '/' + offers.length) : null,
+      modelCooldowns.length
+        ? el('span', { class: 'badge warn' }, '模型冷却 ' + modelCooldowns.length)
+        : null,
     ]),
     lastProbeAt
       ? el('div', { class: 'muted', style: 'font-size:10px;margin-top:3px' }, '探测 ' + fmtTime(lastProbeAt))
