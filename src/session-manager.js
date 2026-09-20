@@ -1551,6 +1551,7 @@ export class SessionManager {
 
   async shutdown() {
     this._clearPoll()
+    this._clearSmartProbe()
     this._clearIdleRelease()
     this._clearReleaseRetry()
     if (this.config.session.releaseOnShutdown) {
