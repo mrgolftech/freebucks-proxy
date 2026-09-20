@@ -2148,7 +2148,7 @@ async function syncUpstreamModels() {
   const btn = document.querySelector('#models-card .primary, .card .primary')
   let upstream
   try {
-    upstream = await api('/api/models/upstream')
+    upstream = await api('/api/models/upstream?fresh=1')
   } catch (err) {
     toast('拉取上游失败: ' + err.message, true)
     return
