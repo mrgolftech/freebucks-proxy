@@ -468,7 +468,7 @@ function toOpenAiModel(m, meta) {
     display_name: m.displayName,
     pool: m.pool,
     multimodal: m.multimodal,
-    access_tiers: admission.tiers.length ? admission.tiers : m.accessTiers,
+    access_tiers: modelTierFacts(m.id)?.tiers ?? m.accessTiers,
     // Keep catalog visibility independent from current entitlement. Older code
     // filtered available:false and made a limited account see only one model.
     available: meta.available,
