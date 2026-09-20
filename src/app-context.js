@@ -370,6 +370,7 @@ export class AccountRuntimes {
         // Freebucks 计量（2026-09 改版）：余额 / 每日池 / 每模型 session 单价。
         // 控制台据此显示"这个号还剩多少、这个模型一次多少钱"。
         freebucks: snap?.freebucks || null,
+        entitlements: snap?.entitlements || null,
         // 最近一次早退 DELETE 的退款回执（空闲释放/换号释放都会产生）
         lastRefund: snap?.lastRefund || null,
         // ── 「我们在省钱」的只读证据 ─────────────────────────────
@@ -469,6 +470,9 @@ export class AccountRuntimes {
       s.freebucks = rec.freebucks
     }
     if (rec.quota && typeof rec.quota === 'object') s.quota = rec.quota
+    if (rec.entitlements && typeof rec.entitlements === 'object') {
+      s.entitlements = rec.entitlements
+    }
     if (rec.lastProbe && typeof rec.lastProbe === 'object') {
       s.lastProbe = rec.lastProbe
     }
@@ -1578,7 +1582,7 @@ export class AccountRuntimes {
 
   /**
    * @param {string} key
-   * @param {{ freebucks?: any, quota?: any, lastProbe?: any }} snap
+   * @param {{ freebucks?: any, quota?: any, entitlements?: any, lastProbe?: any }} snap
    */
   _persistAccountState(key, snap) {
     if (!key || !snap) return
@@ -1600,6 +1604,7 @@ export class AccountRuntimes {
     }
     if (snap.freebucks !== undefined) fields.freebucks = snap.freebucks
     if (snap.quota !== undefined) fields.quota = snap.quota
+    if (snap.entitlements !== undefined) fields.entitlements = snap.entitlements
     if (snap.lastProbe !== undefined) fields.lastProbe = snap.lastProbe
     const user = this.byKey.get(key)?.user
     if (user?.email) fields.email = user.email
