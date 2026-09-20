@@ -609,7 +609,9 @@ function renderStatCards(data) {
   // 可用 = 已启用 + 无账号级冷却 **且** 未封禁。
   const banned = data.accounts.filter((a) => a.banned === true || a.bannedAt).length
   const available = data.accounts.filter((a) => a.available && !(a.banned === true || a.bannedAt)).length
-  const cooldown = data.accounts.filter((a) => a.cooldownUntil && !a.banned).length
+  const cooldown = data.accounts.filter(
+    (a) => a.enabled !== false && a.cooldownUntil && !a.banned,
+  ).length
   const inFlight = data.accounts.reduce((n, a) => n + (a.inFlight || 0), 0)
   // 全局闸门占用：inFlight 贴着 limit 不动就是槽位泄漏（服务会"看着在跑
   // 却不接单"）。排队数 >0 说明已经在限流。
