@@ -612,12 +612,15 @@ export function createWebApi(deps) {
       } catch {
         // ignore
       }
-      // 只读探测预热：导入后立即刷新 session/额度缓存（不占额度）
-      try {
-        const rt = runtimes.get(saved.key)
-        await rt.sessions.refresh()
-      } catch {
-        // ignore — 探测失败不影响导入
+      // 只读探测预热：只有启用账号才主动出网。导入时若显式 enabled:false，
+      // 就保持“静默停用”，直到用户手工启用或点击单账号检测。
+      if (saved.user.enabled !== false) {
+        try {
+          const rt = runtimes.get(saved.key)
+          await rt.sessions.refresh()
+        } catch {
+          // ignore — 探测失败不影响导入
+        }
       }
       logger.info('account imported via web', { key: saved.key, email: saved.user.email })
       sendJson(res, 200, { ok: true, account: saved.user.email, key: saved.key, id: saved.user.id || null })
@@ -648,26 +651,50 @@ export function createWebApi(deps) {
         sendJson(res, 404, { error: '账号不存在' })
         return true
       }
-      let proxy
-      try {
-        proxy = normalizeBoundProxy(body.proxy)
-      } catch (err) {
-        sendJson(res, 400, {
-          error: err instanceof Error ? err.message : String(err),
-        })
+      const hasProxy = Object.prototype.hasOwnProperty.call(body, 'proxy')
+      const hasEnabled = Object.prototype.hasOwnProperty.call(body, 'enabled')
+      if (!hasProxy && !hasEnabled) {
+        sendJson(res, 400, { error: '没有可更新的账号字段（支持 proxy / enabled）' })
         return true
       }
-      raw.proxy = proxy
+
+      if (hasProxy) {
+        try {
+          raw.proxy = normalizeBoundProxy(body.proxy)
+        } catch (err) {
+          sendJson(res, 400, {
+            error: err instanceof Error ? err.message : String(err),
+          })
+          return true
+        }
+      }
+
+      if (hasEnabled) {
+        if (typeof body.enabled !== 'boolean') {
+          sendJson(res, 400, { error: 'enabled 必须是 boolean' })
+          return true
+        }
+        raw.enabled = body.enabled
+      }
+
       writeJsonFile(row.path, raw)
-      // 让新的出口代理立即生效：丢弃缓存的 runtime。显式 proxy 会进入
-      // createUpstreamClient 的 single 分支，因此连接失败也不会偷偷切到池里别的出口。
+      // 代理变更 / 启停切换都立即让新请求看到新状态。
+      // invalidate 只是把 runtime 从调度缓存摘掉；已有 SSE 会先自然结束，
+      // 再 releaseWhenIdle 释放会话，不会因为点“停用”就硬掐断当前回复。
       await runtimes.invalidate(row.key)
-      logger.info('account proxy updated via web', {
+      logger.info('account settings updated via web', {
         key: row.key,
         email: row.email,
-        proxy: proxyForLog(proxy),
+        proxy: proxyForLog(raw.proxy || null),
+        enabled: raw.enabled !== false,
       })
-      sendJson(res, 200, { ok: true, key: row.key, email: row.email, proxy })
+      sendJson(res, 200, {
+        ok: true,
+        key: row.key,
+        email: row.email,
+        proxy: raw.proxy || null,
+        enabled: raw.enabled !== false,
+      })
       return true
     }
 
@@ -695,6 +722,7 @@ export function createWebApi(deps) {
         fingerprintId: raw.fingerprintId || null,
         fingerprintHash: raw.fingerprintHash || null,
         proxy: raw.proxy || null,
+        enabled: raw.enabled !== false,
       }
       sendJson(res, 200, { ok: true, key: row.key, credential })
       return true
