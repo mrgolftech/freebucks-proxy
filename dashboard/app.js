@@ -838,7 +838,7 @@ function sectionOpen(section) {
 function buildAccountSection(section, rows) {
   const table = el('div', { class: 'table-wrap' }, [
     el('table', {}, [
-      el('thead', {}, el('tr', {}, ['账号', '启用', '状态', 'Session', '并发', '时间轴（导入/更新/调度）', '额度（今日 · FB/h）', 'Freebucks', '请求', '冷却', '出口', '操作'].map((t) => el('th', {}, t)))),
+      el('thead', {}, el('tr', {}, ['账号', '启用', '状态', '授权', 'Session', '并发', '时间轴（导入/更新/调度）', '额度（今日 · FB/h）', 'Freebucks', '请求', '冷却', '出口', '操作'].map((t) => el('th', {}, t)))),
       el('tbody', {}, rows.map((a, i) => buildAccountRow(a, i))),
     ]),
   ])
@@ -909,6 +909,37 @@ function applyAccountsSections(accounts) {
     if (!keep.has(node.dataset.section)) node.remove()
   }
   return true
+}
+
+function accountEntitlementCell(a) {
+  const ent = a.entitlements || {}
+  const tier = ent.accessTier || null
+  const sub = ent.subscription?.tierId || null
+  const offers = Array.isArray(ent.limitedModelOffers) ? ent.limitedModelOffers : []
+  const joinable = offers.filter((o) =>
+    Number(o?.remaining || 0) > 0 && Number(o?.userRemaining || o?.user_remaining || 0) > 0,
+  )
+  const lastProbeAt = a.lastProbe?.at || null
+  const tierLabel = tier === 'full' ? 'Full' : tier === 'limited' ? 'Limited' : tier === 'free' ? 'Free' : '未知'
+  const tierCls = tier === 'limited' ? 'badge warn' : tier ? 'badge ok' : 'badge'
+  const details = [
+    tier ? 'Access tier: ' + tier : 'Access tier: 尚未探测',
+    sub ? 'Subscription: ' + sub : 'Subscription: 无/未报告',
+    offers.length ? 'Limited offers: ' + offers.length + '（当前可加入 ' + joinable.length + '）' : 'Limited offers: 无/未报告',
+    ent.limitedOfferReason ? 'Offer reason: ' + ent.limitedOfferReason : null,
+    lastProbeAt ? '最近只读探测: ' + new Date(lastProbeAt).toLocaleString() : '最近只读探测: 无',
+    '额度状态会由后端 smart probe 按请求活动、resetAt 和限流退避自动刷新。',
+  ].filter(Boolean).join('\n')
+  return el('div', { style: 'min-width:110px', title: details }, [
+    el('div', { class: 'row', style: 'gap:4px;flex-wrap:wrap' }, [
+      el('span', { class: tierCls }, tierLabel),
+      sub ? el('span', { class: 'badge ok' }, sub) : null,
+      offers.length ? el('span', { class: joinable.length ? 'badge ok' : 'badge warn' }, 'Offer ' + joinable.length + '/' + offers.length) : null,
+    ]),
+    lastProbeAt
+      ? el('div', { class: 'muted', style: 'font-size:10px;margin-top:3px' }, '探测 ' + fmtTime(lastProbeAt))
+      : el('div', { class: 'muted', style: 'font-size:10px;margin-top:3px' }, '尚未探测'),
+  ])
 }
 
 function buildAccountRow(a, i) {
@@ -993,6 +1024,7 @@ function buildAccountRow(a, i) {
     ]),
     el('td', {}, accountEnabledControl(a)),
     el('td', {}, statusBadge),
+    el('td', {}, accountEntitlementCell(a)),
     el('td', { class: 'mono', style: 'font-size:12px' }, sess),
     el('td', { class: 'mono' }, `${a.inFlight || 0}/${a.concurrency || 1}`),
     accountTimeCell(a),
