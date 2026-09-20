@@ -45,6 +45,8 @@ toast(`✅ ${a.email} 可用 · ${modelCount} 个模型`)
 
 ## Testing
 
-- `npm test`（smoke 含 dashboard 语法门禁）、`npm run typecheck`、`verify-all.ts --base HEAD`。
+- `npm test`：新增 dashboard 源码级断言，要求成功 toast 只能是
+  `✅ <email> 可用 · N 个模型`，并禁止旧的次数额度/钱包计费明细回流。
+- `npm run typecheck`、`verify-all.ts --base HEAD`。
 - 隔离实例上重放 `probeAccount()` 的取数逻辑，确认 toast 文案为
   `✅ <email> 可用 · 10 个模型`，且不再包含模型 id 列表。
