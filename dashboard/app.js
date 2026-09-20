@@ -2810,7 +2810,7 @@ function shortProxy(proxy) {
  * - fallback: 页面上一轮成功读取到的代理，防止一次瞬时 GET 失败就把列表假装成空
  *
  * 见 Agent Note:
- * .agents/notes/implemented/bugfix/2026-09-20-account-login-proxy-list.md
+ * .agents/notes/implemented/bug-fix/2026-09-20-account-login-proxy-list.md
  */
 function collectAvailableProxies(pdata, fallback = []) {
   const rows = Array.isArray(pdata?.accounts) ? pdata.accounts : []
