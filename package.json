@@ -1,6 +1,6 @@
 {
   "name": "freebuff-proxy",
-  "version": "1.17.0",
+  "version": "1.17.1",
   "private": true,
   "description": "OpenAI-compatible API gateway with account pooling, session management, quota awareness and a web console",
   "repository": {
