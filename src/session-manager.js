@@ -745,7 +745,71 @@ export class SessionManager {
     }
 
     logger.info('admitting freebuff session', { model })
-    const body = await this.upstream.freebuffSession('POST', { model })
+    let body
+    try {
+      body = await this.upstream.freebuffSession('POST', { model })
+    } catch (err) {
+      if (!(err instanceof UpstreamError) || err.code !== 'session_admission_unknown') {
+        throw err
+      }
+
+      // Admission POST is a takeover mutation. If its response is lost, the
+      // server may already have created/rotated the instance. Reconcile with
+      // read-only GET before any replay; only an explicit "none" proves a new
+      // POST is safe. This follows the official CLI's unknown-outcome rule.
+      logger.warn('session admission outcome unknown; reconciling with GET', {
+        model,
+        error: err.message,
+      })
+      let reconciled
+      try {
+        reconciled = await this.upstream.freebuffSession('GET')
+      } catch (probeErr) {
+        throw new UpstreamError(
+          'freebuff session admission outcome remains unknown after reconciliation failed',
+          {
+            status: err.status || 502,
+            code: 'session_admission_unknown',
+            body: {
+              admission: err.body,
+              reconcileError:
+                probeErr instanceof Error ? probeErr.message : String(probeErr),
+            },
+          },
+        )
+      }
+
+      if (
+        reconciled?.status === 'active' &&
+        reconciled.instanceId &&
+        reconciled.model === model
+      ) {
+        this.admitCount += 1
+        this._apply(reconciled)
+        this._armPoll()
+        logger.info('recovered active session after ambiguous admission', {
+          model,
+          instanceId: reconciled.instanceId,
+        })
+        return this.session
+      }
+
+      if (reconciled?.status === 'none') {
+        logger.info('ambiguous admission reconciled as none; retrying POST once', {
+          model,
+        })
+        body = await this.upstream.freebuffSession('POST', { model })
+      } else {
+        throw new UpstreamError(
+          'freebuff session admission outcome conflicts with requested model',
+          {
+            status: 409,
+            code: reconciled?.status || 'session_admission_unknown',
+            body: { ...reconciled, requestedModel: model },
+          },
+        )
+      }
+    }
 
     if (body?.status === 'active' && body.instanceId) {
       this.admitCount += 1

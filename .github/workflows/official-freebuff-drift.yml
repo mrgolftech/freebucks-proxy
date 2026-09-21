@@ -1,0 +1,32 @@
+name: Official Freebuff drift
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Daily; only watched protocol/model source changes fail the check.
+    - cron: "37 2 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: official-freebuff-drift
+  cancel-in-progress: true
+
+jobs:
+  drift:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Clone official CodebuffAI/freebuff reference
+        run: |
+          git clone --filter=blob:none --no-checkout https://github.com/CodebuffAI/freebuff.git "$RUNNER_TEMP/freebuff-official"
+
+      - name: Check watched protocol and model drift
+        id: drift
+        run: node scripts/check-official-drift.mjs "$RUNNER_TEMP/freebuff-official"

@@ -1058,7 +1058,7 @@ export function createProxyHandler(ctx) {
             })
 
             const toolNameMapper = createToolNameMapper(body.tools)
-            const forwardBody = buildForwardBody(
+            let forwardBody = buildForwardBody(
               body,
               upstreamModel,
               snap.instanceId,
@@ -1079,6 +1079,46 @@ export function createProxyHandler(ctx) {
               schedulingDeadline,
               upstreamModel,
             })
+
+            // trefeon #680 验证过的恢复契约：agent run 已死时只轮换 run，
+            // 不碰仍然有效、且可能已经付费的 Freebuff session。
+            // 一次请求最多执行一次 fresh-run retry，避免坏请求形成 run 创建循环。
+            if (
+              !result.ok &&
+              !result.wrote &&
+              result.gateCode === 'run_invalid'
+            ) {
+              const invalidRunId = runId
+              runId = await rt.upstream.startAgentRun({ agentId })
+              clientId = newIds().clientId
+              forwardBody = buildForwardBody(
+                body,
+                upstreamModel,
+                snap.instanceId,
+                runId,
+                agentId,
+                clientId,
+                toolNameMapper,
+              )
+              logger.warn('agent run invalid; retrying once with fresh run', {
+                invalidRunId,
+                freshRunId: runId,
+                agentId,
+                model: upstreamModel,
+                key: rt.key,
+              })
+              result = await forwardCompletions({
+                req,
+                res,
+                forwardBody,
+                stream,
+                toolNameMapper,
+                upstream: rt.upstream,
+                sessionRemainingMs: snap.remainingMs,
+                schedulingDeadline,
+                upstreamModel,
+              })
+            }
           }
 
           // Best-effort close the run registry row
@@ -1646,6 +1686,23 @@ export function createProxyHandler(ctx) {
         error: { message: text, type: 'upstream_error' },
       }
 
+      // runId 已不在 Running：只要求调用方重建 agent run，同一账号/
+      // 同一 Freebuff session 原地重试一次。不要 re-admit、不要冷却账号。
+      if (isRunInvalidResponse(status, parsed || text)) {
+        return {
+          ok: false,
+          wrote: false,
+          recoverable: true,
+          switchAccount: false,
+          noCooldown: true,
+          gateCode: 'run_invalid',
+          retryAfterMs: null,
+          status,
+          body: parsedBody,
+          headers: respHeaders,
+        }
+      }
+
       // free_mode_capacity_deferred：免费模式瞬时容量排队（上游原话
       // "your request will be retried automatically"）。不是账号级故障——
       // 实测同一账号同一 session 立即重试即恢复（flash 尤其常见）。
@@ -1915,6 +1972,31 @@ function methodHasBody(method) {
  * @param {string} text 上游响应体原文
  * @returns {boolean}
  */
+/**
+ * 官方 agent-runs 生命周期拒绝：run 已经不再处于 Running 状态。
+ *
+ * trefeon/freebucks-proxy #680 的线上缺陷记录了上游原文
+ * `400 runId Not Running`；官方 CodebuffAI/freebuff 的 agent-runs START/FINISH
+ * 同样把 runId 作为 chat metadata 的服务端生命周期句柄。
+ *
+ * 这里只识别这个窄错误，不能把所有 400 都当成可恢复 run：普通 400 往往是请求
+ * schema/参数错误，重建 run 只会重复错误并额外制造 server-side run。
+ */
+function isRunInvalidResponse(status, bodyOrText) {
+  if (status !== 400) return false
+  const text =
+    typeof bodyOrText === 'string'
+      ? bodyOrText
+      : (() => {
+          try {
+            return JSON.stringify(bodyOrText ?? '')
+          } catch {
+            return String(bodyOrText ?? '')
+          }
+        })()
+  return /runId\s+Not\s+Running/i.test(text)
+}
+
 function isToolSchemaRejection(status, text) {
   if (status !== 404) return false
   const s = String(text || '')

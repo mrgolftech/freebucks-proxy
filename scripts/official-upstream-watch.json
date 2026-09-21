@@ -1,0 +1,30 @@
+{
+  "source": "CodebuffAI/freebuff",
+  "baselineSha": "bfe84080aa59494e00dccc82b26f8f2b7887697b",
+  "baselineDate": "2026-09-21T01:59:53Z",
+  "note": "Advance baselineSha only after reviewed upstream protocol changes are ported or explicitly accepted.",
+  "categories": {
+    "SESSION": [
+      "cli/src/utils/freebuff-session-api.ts",
+      "common/src/types/freebuff-session.ts",
+      "common/src/constants/freebuff-models.ts"
+    ],
+    "RUN": [
+      "sdk/src/impl/database.ts",
+      "packages/agent-runtime/src/constants.ts",
+      "packages/agent-runtime/src/prompt-agent-stream.ts",
+      "packages/agent-runtime/src/run-agent-step.ts",
+      "packages/agent-runtime/src/run-programmatic-step.ts"
+    ],
+    "FINGERPRINT": [
+      "common/src/constants/foreign-client-signals.ts",
+      "common/src/tools/constants.ts"
+    ],
+    "MODEL_PRICE": [
+      "common/src/constants/freebuff-models.ts",
+      "common/src/constants/freebuff-model-entitlements.ts",
+      "common/src/constants/freebuff-solar-promo.ts",
+      "common/src/constants/model-config.ts"
+    ]
+  }
+}

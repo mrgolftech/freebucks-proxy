@@ -416,20 +416,91 @@ export function createUpstreamClient(config, token, opts = {}) {
         includeAuth: false, // already set
       }
 
-      // 官方 POST 打 .../session/admission，GET/DELETE 打 .../session（二进制
-      // PN$）。优先用官方端点对齐指纹；老部署没有 /admission 时回落
-      // legacy /session —— 绝不因为"对齐"丢掉可用性（官方自己把 404/405 当作
-      // session_admission_unavailable，我们回落即可）。
-      let res = await apiFetch(
-        method === 'POST' ? SESSION_ADMISSION_ENDPOINT : SESSION_ENDPOINT,
-        init,
-      )
+      // 官方最新 CLI（CodebuffAI/freebuff bfe84080，
+      // cli/src/utils/freebuff-session-api.ts）规定：
+      // POST 只打 /session/admission；404/405 表示客户端协议已不兼容，必须停止，
+      // **不得**回退 POST /session。原因是 takeover POST 不是天然幂等操作，
+      // 盲目改端点/重发可能重复旋转 active instance。
+      const endpoint =
+        method === 'POST' ? SESSION_ADMISSION_ENDPOINT : SESSION_ENDPOINT
+
+      // Official Freebuff treats admission POST as non-idempotent. A request
+      // that produced no response (timeout/socket failure), or an ambiguous
+      // 5xx, may already have rotated the active instance and MUST NOT be
+      // blindly replayed. Explicit 408/429/503 are the only safe HTTP retry
+      // dispositions because upstream guarantees they happen before mutation.
+      let res
+      let safeAdmissionRetryUsed = false
+      while (true) {
+        try {
+          res = await apiFetch(endpoint, init)
+        } catch (err) {
+          if (method === 'POST') {
+            throw new UpstreamError(
+              'Freebuff session admission outcome is unknown; reconcile with GET before retrying.',
+              {
+                status: 502,
+                code: 'session_admission_unknown',
+                body: {
+                  cause: err instanceof Error ? err.message : String(err),
+                },
+              },
+            )
+          }
+          throw err
+        }
+        if (
+          method === 'POST' &&
+          !safeAdmissionRetryUsed &&
+          [408, 429, 503].includes(res.status)
+        ) {
+          safeAdmissionRetryUsed = true
+          // Typed 429 responses carry meaningful account/session state and are
+          // handled below; only opaque edge 429s are safe to replay.
+          if (res.status === 429) {
+            const probeText = await res.text()
+            let probeBody = null
+            try {
+              probeBody = probeText ? JSON.parse(probeText) : null
+            } catch {
+              probeBody = { raw: probeText }
+            }
+            if (
+              probeBody &&
+              ['rate_limited', 'spend_limited', 'ip_capped', 'free_mode_rate_limited'].includes(
+                probeBody.status,
+              )
+            ) {
+              return probeBody
+            }
+          }
+          continue
+        }
+        break
+      }
+      if (
+        method === 'POST' &&
+        res.status >= 500 &&
+        ![503].includes(res.status)
+      ) {
+        const unknownText = await res.text().catch(() => '')
+        throw new UpstreamError(
+          `Freebuff session admission outcome is unknown: ${res.status}`,
+          {
+            status: res.status,
+            code: 'session_admission_unknown',
+            body: { raw: unknownText },
+          },
+        )
+      }
       if (method === 'POST' && (res.status === 404 || res.status === 405)) {
-        logger.warn('session admission endpoint unavailable; falling back', {
-          status: res.status,
-          fallback: SESSION_ENDPOINT,
-        })
-        res = await apiFetch(SESSION_ENDPOINT, init)
+        throw new UpstreamError(
+          'Freebuff session admission is unsupported by the upstream; update protocol/client.',
+          {
+            status: res.status,
+            code: 'session_admission_unsupported',
+          },
+        )
       }
 
       if (res.status === 404) {
@@ -455,7 +526,10 @@ export function createUpstreamClient(config, token, opts = {}) {
       if (
         res.status === 409 &&
         body &&
-        (body.status === 'model_locked' || body.status === 'model_unavailable')
+        (body.status === 'model_locked' ||
+          body.status === 'model_unavailable' ||
+          body.status === 'first_tab_discount_changed' ||
+          body.status === 'consent_required')
       ) {
         return body
       }
