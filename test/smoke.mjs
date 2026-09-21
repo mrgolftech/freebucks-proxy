@@ -431,6 +431,99 @@ configureLogger({ level: 'error' })
   assert.equal(rewriteToolNamesForUpstream(plain, identity), plain)
 }
 
+// --- unit: ambiguous admission must reconcile before any replay ---
+{
+  const makeManager = (freebuffSession) =>
+    new SessionManager({
+      accountKey: 'admission-test',
+      upstream: { freebuffSession },
+      config: {
+        session: { pollIntervalSec: 30, idleReleaseSec: 0 },
+        limits: {},
+      },
+    })
+
+  // POST outcome unknown + GET active: adopt the server instance; never POST twice.
+  {
+    let posts = 0
+    let gets = 0
+    const sm = makeManager(async (method) => {
+      if (method === 'POST') {
+        posts += 1
+        throw new UpstreamError('lost response', {
+          status: 502,
+          code: 'session_admission_unknown',
+        })
+      }
+      gets += 1
+      return {
+        status: 'active',
+        instanceId: 'recovered-instance',
+        model: 'z-ai/glm-5.3-flash',
+        expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+      }
+    })
+    const s = await sm.ensureSession('z-ai/glm-5.3-flash')
+    assert.equal(s.instanceId, 'recovered-instance')
+    assert.equal(posts, 1, 'GET active 后绝不能重复 admission POST')
+    assert.equal(gets, 1, 'unknown outcome 必须先 GET reconciliation')
+    sm._clearPoll()
+  }
+
+  // POST outcome unknown + GET none: exactly one safe replay is allowed.
+  {
+    let posts = 0
+    let gets = 0
+    const sm = makeManager(async (method) => {
+      if (method === 'GET') {
+        gets += 1
+        return { status: 'none' }
+      }
+      posts += 1
+      if (posts === 1) {
+        throw new UpstreamError('lost response', {
+          status: 502,
+          code: 'session_admission_unknown',
+        })
+      }
+      return {
+        status: 'active',
+        instanceId: 'retry-instance',
+        model: 'z-ai/glm-5.3-flash',
+        expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+      }
+    })
+    const s = await sm.ensureSession('z-ai/glm-5.3-flash')
+    assert.equal(s.instanceId, 'retry-instance')
+    assert.equal(posts, 2, '只有 GET 明确 none 后才允许一次新的 admission POST')
+    assert.equal(gets, 1)
+    sm._clearPoll()
+  }
+
+  // POST outcome unknown + GET failure: remain unknown and never replay POST.
+  {
+    let posts = 0
+    let gets = 0
+    const sm = makeManager(async (method) => {
+      if (method === 'POST') {
+        posts += 1
+        throw new UpstreamError('lost response', {
+          status: 502,
+          code: 'session_admission_unknown',
+        })
+      }
+      gets += 1
+      throw new Error('GET ECONNRESET')
+    })
+    await assert.rejects(
+      () => sm.ensureSession('z-ai/glm-5.3-flash'),
+      (err) => err instanceof UpstreamError && err.code === 'session_admission_unknown',
+    )
+    assert.equal(posts, 1, 'GET 也不确定时绝不能盲目重放 admission POST')
+    assert.equal(gets, 1)
+  }
+}
+
 const originalFetch = globalThis.fetch
 let calls = []
 /** @type {'ok' | 'gate_once' | 'rate_limit_a' | 'rate_limit_completion' | 'err_500_a' | 'capacity_once' | 'capacity_all' | 'run_500_a' | 'run_403_a' | 'run_invalid_once' | 'admission_404' | 'network_err_a' | 'gate_twice_a' | 'hold_once' | 'legacy_luna_once' | 'luna_base2_retired'} */
