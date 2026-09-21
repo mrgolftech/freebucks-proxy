@@ -433,7 +433,7 @@ configureLogger({ level: 'error' })
 
 const originalFetch = globalThis.fetch
 let calls = []
-/** @type {'ok' | 'gate_once' | 'rate_limit_a' | 'rate_limit_completion' | 'err_500_a' | 'capacity_once' | 'capacity_all' | 'run_500_a' | 'run_403_a' | 'network_err_a' | 'gate_twice_a' | 'hold_once' | 'legacy_luna_once' | 'luna_base2_retired'} */
+/** @type {'ok' | 'gate_once' | 'rate_limit_a' | 'rate_limit_completion' | 'err_500_a' | 'capacity_once' | 'capacity_all' | 'run_500_a' | 'run_403_a' | 'run_invalid_once' | 'admission_404' | 'network_err_a' | 'gate_twice_a' | 'hold_once' | 'legacy_luna_once' | 'luna_base2_retired'} */
 let mockMode = 'ok'
 let sessionPosts = 0
 let sessionDeletes = 0
@@ -529,6 +529,9 @@ globalThis.fetch = async (url, init = {}) => {
       headers['x-freebuff-model'] ||
       headers['X-Freebuff-Model'] ||
       'deepseek/deepseek-v4-flash'
+    if (mockMode === 'admission_404') {
+      return new Response('Not found', { status: 404 })
+    }
     // Multi-account: token-a is rate-limited on admit
     const auth =
       headers.Authorization ||
@@ -637,6 +640,22 @@ globalThis.fetch = async (url, init = {}) => {
         return jsonRes({ runId: '00000000-0000-4000-8000-000000000002' })
       }
       startAgentCalls.push(body.agentId)
+      if (mockMode === 'run_invalid_once') {
+        const starts = calls.filter((c) => {
+          if (!c.url.includes('/api/v1/agent-runs')) return false
+          try {
+            return JSON.parse(c.body || '{}').action === 'START'
+          } catch {
+            return false
+          }
+        }).length
+        return jsonRes({
+          runId:
+            starts >= 2
+              ? '00000000-0000-4000-8000-000000000002'
+              : '00000000-0000-4000-8000-000000000001',
+        })
+      }
       return jsonRes({ runId: '00000000-0000-4000-8000-000000000001' })
     }
     if (body.action === 'FINISH') {
@@ -681,9 +700,21 @@ globalThis.fetch = async (url, init = {}) => {
     }
     assert.equal(body.codebuff_metadata.cost_mode, 'free')
     assert.ok(body.codebuff_metadata.freebuff_instance_id)
+    if (mockMode === 'run_invalid_once' && completionAttempts === 0) {
+      completionAttempts++
+      return jsonRes(
+        {
+          error: 'runId Not Running',
+          message: 'runId Not Running',
+        },
+        400,
+      )
+    }
     assert.equal(
       body.codebuff_metadata.run_id,
-      '00000000-0000-4000-8000-000000000001',
+      mockMode === 'run_invalid_once'
+        ? '00000000-0000-4000-8000-000000000002'
+        : '00000000-0000-4000-8000-000000000001',
     )
     assert.ok(Array.isArray(body.messages))
     assert.equal(body.messages[0].role, 'system')
@@ -1555,6 +1586,74 @@ for (const model of verifiedSpecialModels) {
   await ensurePromise
   assert.equal(sessionDeletes, 1, '旧 session 应在流结束后才释放')
   assert.equal(sessionPosts, 2, '应 admit 一个新 session')
+  mockMode = 'ok'
+}
+
+// 官方协议：POST /session/admission 返回 404/405 必须停止，绝不 legacy fallback。
+{
+  await runtimes.get('u1').sessions.release()
+  mockMode = 'admission_404'
+  calls = []
+  sessionPosts = 0
+  await assert.rejects(
+    () =>
+      runtimes.get('u1').upstream.freebuffSession('POST', {
+        model: 'deepseek/deepseek-v4-flash',
+      }),
+    (err) =>
+      err?.code === 'session_admission_unsupported' &&
+      err?.status === 404,
+  )
+  const posts = calls.filter((x) => x.method === 'POST')
+  assert.equal(posts.length, 1, 'unsupported admission must not retry another POST endpoint')
+  assert.match(posts[0].url, /\/api\/v1\/freebuff\/session\/admission$/)
+  mockMode = 'ok'
+}
+
+// run invalid：同账号、同 Freebuff session，仅换 agent run + client_id，且最多重试一次。
+{
+  await runtimes.get('u1').sessions.release()
+  mockMode = 'run_invalid_once'
+  calls = []
+  sessionPosts = 0
+  sessionDeletes = 0
+  completionAttempts = 0
+  startAgentCalls = []
+  const res = await chat({
+    model: 'deepseek/deepseek-v4-flash',
+    messages: [{ role: 'user', content: 'hello' }],
+  })
+  assert.equal(res.status, 200, await res.clone().text())
+  assert.equal(sessionPosts, 1, 'run invalid recovery must reuse the paid session')
+  assert.equal(sessionDeletes, 0, 'run invalid recovery must not release/re-admit session')
+  const starts = calls.filter((x) => {
+    if (!x.url.includes('/api/v1/agent-runs')) return false
+    try {
+      return JSON.parse(x.body || '{}').action === 'START'
+    } catch {
+      return false
+    }
+  })
+  assert.equal(starts.length, 2, 'run invalid must create exactly one fresh run')
+  const completions = calls
+    .filter((x) => x.url.includes('/api/v1/chat/completions'))
+    .map((x) => JSON.parse(x.body))
+  assert.equal(completions.length, 2, 'run invalid must retry chat exactly once')
+  assert.equal(
+    completions[0].codebuff_metadata.freebuff_instance_id,
+    completions[1].codebuff_metadata.freebuff_instance_id,
+    'fresh run retry must keep the same Freebuff instance',
+  )
+  assert.notEqual(
+    completions[0].codebuff_metadata.run_id,
+    completions[1].codebuff_metadata.run_id,
+    'fresh run retry must rotate run_id',
+  )
+  assert.notEqual(
+    completions[0].codebuff_metadata.client_id,
+    completions[1].codebuff_metadata.client_id,
+    'client_id is run-scoped and must rotate with run_id',
+  )
   mockMode = 'ok'
 }
 
