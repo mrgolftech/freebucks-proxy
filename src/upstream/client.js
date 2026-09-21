@@ -416,20 +416,23 @@ export function createUpstreamClient(config, token, opts = {}) {
         includeAuth: false, // already set
       }
 
-      // 官方 POST 打 .../session/admission，GET/DELETE 打 .../session（二进制
-      // PN$）。优先用官方端点对齐指纹；老部署没有 /admission 时回落
-      // legacy /session —— 绝不因为"对齐"丢掉可用性（官方自己把 404/405 当作
-      // session_admission_unavailable，我们回落即可）。
-      let res = await apiFetch(
+      // 官方最新 CLI（CodebuffAI/freebuff bfe84080，
+      // cli/src/utils/freebuff-session-api.ts）规定：
+      // POST 只打 /session/admission；404/405 表示客户端协议已不兼容，必须停止，
+      // **不得**回退 POST /session。原因是 takeover POST 不是天然幂等操作，
+      // 盲目改端点/重发可能重复旋转 active instance。
+      const res = await apiFetch(
         method === 'POST' ? SESSION_ADMISSION_ENDPOINT : SESSION_ENDPOINT,
         init,
       )
       if (method === 'POST' && (res.status === 404 || res.status === 405)) {
-        logger.warn('session admission endpoint unavailable; falling back', {
-          status: res.status,
-          fallback: SESSION_ENDPOINT,
-        })
-        res = await apiFetch(SESSION_ENDPOINT, init)
+        throw new UpstreamError(
+          'Freebuff session admission is unsupported by the upstream; update protocol/client.',
+          {
+            status: res.status,
+            code: 'session_admission_unsupported',
+          },
+        )
       }
 
       if (res.status === 404) {
@@ -455,7 +458,10 @@ export function createUpstreamClient(config, token, opts = {}) {
       if (
         res.status === 409 &&
         body &&
-        (body.status === 'model_locked' || body.status === 'model_unavailable')
+        (body.status === 'model_locked' ||
+          body.status === 'model_unavailable' ||
+          body.status === 'first_tab_discount_changed' ||
+          body.status === 'consent_required')
       ) {
         return body
       }
