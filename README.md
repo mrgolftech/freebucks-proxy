@@ -1,43 +1,43 @@
 # freebucks-proxy
 
-A lightweight OpenAI-compatible API gateway for unified model access, account/session management, scheduling, quota awareness, and web administration.
+一个轻量级的 AI API 网关，用于统一模型接入、账号与会话管理、调度、配额状态观察和 Web 管理。
 
-The project exposes a familiar API surface to downstream tools while centralizing upstream connectivity, session lifecycle, account pooling, retries, quota state, and operational controls in one service.
+项目向下游提供常见的 API 兼容接口，将上游连接、账号池、会话生命周期、重试、限流和运行状态统一收敛到一个服务中。
 
-## Features
+## 主要功能
 
-- OpenAI-compatible `/v1/chat/completions` and `/v1/models`
-- Streaming and non-streaming responses
-- Multi-account pool with sticky scheduling and failover
-- Session lifecycle and idle-release management
-- Quota, tier, offer, and cooldown visibility
-- Per-account proxy binding and connection checks
-- Model-level rate-limit memory and retry handling
-- Web console for accounts, users, API keys, models, and diagnostics
-- Docker deployment with persistent local data
-- Health checks and operational status endpoints
+- OpenAI 兼容的 `/v1/chat/completions` 与 `/v1/models`
+- 支持流式与非流式响应
+- 多账号池、粘性调度与故障切换
+- 会话生命周期与空闲释放
+- 配额、Tier、Offer 与冷却状态观察
+- 账号绑定代理与连通性检测
+- 模型级限流记忆与重试处理
+- Web 控制台管理账号、用户、API Key、模型和运行状态
+- Docker 部署与本地数据持久化
+- 健康检查与运行诊断
 
-## Quick start
+## 快速开始
 
 ```bash
 git clone https://github.com/mrgolftech/freebucks-proxy.git
 cd freebucks-proxy
 
 cp .env.example .env
-# Edit .env as needed. Setting ADMIN_PASSWORD is recommended.
+# 按需编辑 .env，建议设置 ADMIN_PASSWORD
 
 docker compose up -d
 ```
 
-After startup, open:
+启动后访问：
 
 ```text
-http://<host>:<PORT>
+http://<宿主机IP>:<PORT>
 ```
 
-The default port is defined by the project configuration. Account credentials, API keys, proxy settings, and model state can be managed from the Web console.
+账号、API Key、代理、模型和运行状态均可通过 Web 控制台管理。
 
-Common operations:
+常用命令：
 
 ```bash
 docker compose ps
@@ -48,25 +48,25 @@ docker compose up -d
 docker compose down
 ```
 
-Persistent runtime data is stored under the configured data directory, so normal container updates do not require re-creating account state.
+运行数据保存在配置的数据目录中，正常更新容器不会要求重新创建账号状态。
 
 ## API
 
-The main compatibility endpoints are:
+主要兼容接口：
 
-| Endpoint | Purpose |
+| 接口 | 用途 |
 |---|---|
-| `POST /v1/chat/completions` | Chat completion endpoint |
-| `GET /v1/models` | Model catalog and availability state |
-| `GET /healthz` | Service health check |
+| `POST /v1/chat/completions` | 对话请求 |
+| `GET /v1/models` | 模型目录与可用状态 |
+| `GET /healthz` | 服务健康检查 |
 
-Downstream clients typically only need:
+下游通常只需要配置：
 
 ```text
 base_url + api_key + model
 ```
 
-Example:
+示例：
 
 ```bash
 curl http://127.0.0.1:8787/v1/chat/completions \
@@ -79,69 +79,65 @@ curl http://127.0.0.1:8787/v1/chat/completions \
   }'
 ```
 
-## Account and session management
+## 账号与会话管理
 
-The gateway keeps account state, active sessions, quota snapshots, cooldowns, and routing information in one place.
+网关统一维护账号状态、活动会话、配额快照、冷却窗口和路由信息。
 
-Scheduling is designed around a few practical rules:
+调度遵循几个基本原则：
 
-- Prefer an already usable session when possible.
-- Keep requests sticky instead of rotating accounts unnecessarily.
-- Avoid accounts or model lanes that are temporarily unavailable.
-- Respect explicit retry/reset windows returned by the upstream service.
-- Keep model-scoped failures isolated from unrelated models when possible.
-- Refresh quota and entitlement state without creating unnecessary sessions.
+- 优先复用已有可用会话；
+- 尽量保持账号粘性，避免无意义轮换；
+- 跳过暂时不可用的账号或模型通道；
+- 尊重上游返回的明确重试与重置时间；
+- 尽量把模型级故障限制在对应模型，不影响同账号其他模型；
+- 在不创建额外会话的前提下刷新配额与授权状态。
 
-The Web console surfaces these states so routing decisions can be inspected instead of being hidden inside the scheduler.
+这些状态都会在 Web 控制台中展示，方便定位实际调度行为。
 
-## Model availability
+## 模型状态
 
-Model availability is derived from the current upstream session/catalog state rather than treated as a permanently static list.
+模型可用性根据当前上游会话和目录状态动态生成，而不是依赖永久固定列表。
 
-Depending on the account and upstream state, the console may show conditions such as:
+控制台可能显示：
 
-- available
-- subscription required
-- limited offer unavailable
-- trial exhausted
-- temporarily rate-limited
-- withdrawn or replaced
+- 可用
+- 需要订阅
+- Offer 暂不可用
+- Trial 已用完
+- 临时限流
+- 已下线或存在替代模型
 
-These states are observational. Final availability, pricing, quota, and admission decisions remain controlled by the upstream service.
+最终可用性、配额、价格与准入结果仍以上游实时返回为准。
 
-## Proxy and network
+## 代理与网络
 
-The service supports explicit proxy configuration and account-bound egress selection. This is useful when deployments need stable outbound routing or separate network paths for different accounts.
+支持显式代理配置和账号绑定出口，可用于需要稳定出口或不同账号使用独立网络路径的部署环境。
 
-See [Proxy support](docs/proxy.md) for the configuration details.
+详见 [代理支持](docs/proxy.md)。
 
-## Configuration
+## 文档
 
-Most day-to-day configuration can be managed from the Web console. File/environment configuration remains available for deployment and bootstrap settings.
-
-Useful references:
-
-| Document | Content |
+| 文档 | 内容 |
 |---|---|
-| [Deployment](docs/deployment.md) | Docker deployment, persistence, backup, CI images |
-| [Web console](docs/web-console.md) | Accounts, users, API keys, and administration |
-| [Scheduling](docs/scheduling.md) | Account pool, sessions, quota protection, routing |
-| [Connection health](docs/connection-health.md) | Connection cleanup, reconnect, restart behavior |
-| [Proxy support](docs/proxy.md) | Egress proxies and connectivity checks |
-| [Multimodal input](docs/multimodal-image-input.md) | Image-input compatibility notes |
-| [API integration](docs/api.md) | API behavior and integration details |
-| [Development](docs/development.md) | Local development, commands, and tests |
-| [Configuration reference](docs/configuration.md) | Configuration options |
+| [部署与运维](docs/deployment.md) | Docker、持久化、备份与 CI 镜像 |
+| [Web 控制台](docs/web-console.md) | 账号、用户、API Key 与管理操作 |
+| [多账号池与调度](docs/scheduling.md) | 账号池、会话、配额保护与调度 |
+| [连接治理](docs/connection-health.md) | 连接清理、重连与重启策略 |
+| [代理支持](docs/proxy.md) | 出口代理与连通性检测 |
+| [多模态输入](docs/multimodal-image-input.md) | 图片输入兼容说明 |
+| [API 接入](docs/api.md) | API 行为与集成说明 |
+| [本地开发](docs/development.md) | 本地启动、命令与测试 |
+| [配置参考](docs/configuration.md) | 配置项说明 |
 
-## Development
+## 本地开发
 
-Requirements:
+环境要求：
 
 - Node.js 20+
 - npm
-- Docker, if container validation is required
+- Docker（需要验证容器时）
 
-Common commands:
+常用命令：
 
 ```bash
 npm ci
@@ -150,15 +146,15 @@ npm run typecheck
 npm start
 ```
 
-The repository CI also validates the container image boot path before release.
+发布前 CI 会同时验证测试、类型检查和容器启动路径。
 
-## Notes
+## 说明
 
-- This project is an independent compatibility gateway and is not affiliated with any upstream service provider.
-- Authentication, availability, quota, pricing, regional restrictions, and rate limits are ultimately determined by the configured upstream service.
-- The project does not guarantee unlimited usage or bypass upstream access controls.
-- Use the service in accordance with the terms and policies that apply to your upstream account and deployment environment.
+- 本项目是独立的兼容接入网关，与任何上游服务提供方均无隶属关系。
+- 鉴权、可用性、配额、价格、区域限制和限流最终由所配置的上游服务决定。
+- 本项目不保证无限使用，也不绕过上游访问控制。
+- 请按照对应上游账号与部署环境适用的条款和策略使用。
 
 ## License
 
-MIT License. See [LICENSE](./LICENSE).
+MIT License，详见 [LICENSE](./LICENSE)。
