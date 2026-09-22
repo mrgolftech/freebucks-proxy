@@ -218,6 +218,25 @@ configureLogger({ level: 'error' })
   assert.equal(state.admissible, true)
   assert.equal(state.status, 'available')
 
+  state = modelAdmissionState('mimo/mimo-v2.6-pro', {
+    accessTier: 'full',
+    subscriptionTierId: null,
+  })
+  assert.equal(state.admissible, false)
+  assert.equal(state.status, 'plan_required')
+
+  state = modelAdmissionState('mimo/mimo-v2.6-pro', {
+    accessTier: 'full',
+    subscriptionTierId: 'pro',
+  })
+  assert.equal(state.admissible, true)
+  assert.equal(state.status, 'available')
+
+  const mimoFlash = buildModelsListResponse().data.find((m) => m.id === 'mimo/mimo-v2.5')
+  const mimoPro = buildModelsListResponse().data.find((m) => m.id === 'mimo/mimo-v2.6-pro')
+  assert.equal(mimoFlash?.display_name, 'MiMo 2.6 Flash')
+  assert.equal(mimoPro?.display_name, 'MiMo 2.6 Pro')
+
   state = modelAdmissionState('anthropic/claude-fable-5.1', {
     accessTier: 'full',
     limitedOffers: [],
