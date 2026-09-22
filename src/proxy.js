@@ -1464,12 +1464,9 @@ export function createProxyHandler(ctx) {
         : {}),
       data_collection: 'deny',
     }
-    // CLI 全局停止序列：JSON 编码带引号的哨兵 `"cb_easp"`（agent-runtime
-    // globalStopSequence = JSON.stringify(endsAgentStepParam)），客户端没给
-    // stop 时补上，与官方 CLI 一致。
-    if (!body.stop) {
-      body.stop = [`"cb_easp"`]
-    }
+    // CodebuffAI/freebuff 0.0.183 removed agent-runtime globalStopSequence.
+    // Do not synthesize the legacy `"cb_easp"` stop sentinel. If the caller
+    // supplied an explicit OpenAI `stop`, it remains on body unchanged.
     return body
   }
 
