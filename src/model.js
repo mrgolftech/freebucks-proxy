@@ -205,13 +205,14 @@ const MODEL_TIER_FACTS = new Map([
   ['minimax/minimax-m3', { tiers: [], withdrawn: true, replacement: 'z-ai/glm-5.3-flash' }],
   ['openai/gpt-5.6-luna', { tiers: ['full', 'paid'] }],
   ['upstage/solar-pro4', { tiers: ['limited', 'full'] }],
-  ['google/gemini-3.8-flash', { tiers: ['paid'] }],
+  ['google/gemini-3.8-flash', { tiers: ['full', 'paid'], planRequired: true }],
   ['meta/muse-spark-1.3-contributor', { tiers: [], withdrawn: true, replacement: 'z-ai/glm-5.3-flash' }],
   ['meta/muse-spark-1.2-contributor', { tiers: ['full'] }],
   ['z-ai/glm-5.2', { tiers: [], withdrawn: true, replacement: 'z-ai/glm-5.3-flash' }],
   ['z-ai/glm-5.3-flash', { tiers: ['limited', 'full', 'paid'] }],
   ['deepseek/deepseek-v4-flash', { tiers: ['limited', 'full', 'paid'] }],
   ['mimo/mimo-v2.5', { tiers: ['limited', 'full'] }],
+  ['mimo/mimo-v2.6-pro', { tiers: ['full', 'paid'], planRequired: true }],
   ['anthropic/claude-fable-5.1', { tiers: ['offer'] }],
 ])
 
@@ -260,14 +261,17 @@ export function modelAdmissionState(id, opts = {}) {
   const accessTier = opts.accessTier || null
   const paid = Boolean(opts.subscriptionTierId)
 
+  const planRequired = facts?.planRequired === true
   let admissible = tiers.length === 0
   if (tiers.includes('offer')) admissible ||= Boolean(offer?.joinable)
   if (tiers.includes('paid')) admissible ||= paid
-  if (tiers.includes('full')) admissible ||= accessTier === 'full' || accessTier === 'free'
-  if (tiers.includes('limited')) admissible ||= accessTier === 'limited'
+  if (!planRequired && tiers.includes('full')) admissible ||= accessTier === 'full' || accessTier === 'free'
+  if (!planRequired && tiers.includes('limited')) admissible ||= accessTier === 'limited'
 
   let status = admissible ? 'available' : 'unknown'
-  if (!admissible && tiers.includes('paid') && !paid && !tiers.includes('full') && !tiers.includes('limited')) {
+  if (!admissible && planRequired && !paid) {
+    status = 'plan_required'
+  } else if (!admissible && tiers.includes('paid') && !paid && !tiers.includes('full') && !tiers.includes('limited')) {
     status = 'plan_required'
   } else if (!admissible && tiers.includes('offer')) {
     status =
